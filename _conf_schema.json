@@ -372,7 +372,7 @@
         "type": "int",
         "slider": {
           "min": 1,
-          "max": 5,
+          "max": 15,
           "step": 1
         },
         "default": 5
@@ -383,7 +383,7 @@
         "type": "int",
         "slider": {
           "min": 1,
-          "max": 10,
+          "max": 100,
           "step": 1
         },
         "default": 3
@@ -419,10 +419,10 @@
         ]
       },
       "show_generation_info": {
-        "description": "顯示生圖資訊",
-        "hint": "生圖成功後,傳送訊息展示生圖耗時和生成圖片數量",
+        "description": "顯示成功耗時提示",
+        "hint": "生圖成功後，傳送訊息顯示耗時與生成圖片數量，",
         "type": "bool",
-        "default": false
+        "default": true
       },
       "show_model_info": {
         "description": "顯示模型資訊",

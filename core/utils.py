@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Iterable
 from io import BytesIO
 
@@ -25,13 +26,14 @@ SUPPORTED_IMAGE_FORMATS = {
     "image/heif",
 }
 
-# 使用 constants.py 中的定義，轉換為 set 以保持向後相容
+# Use the constants module values and keep local set lookups for compatibility.
 ALLOWED_ASPECT_RATIOS = set(SUPPORTED_ASPECT_RATIOS)
 ALLOWED_RESOLUTIONS = set(SUPPORTED_RESOLUTIONS)
+SELF_AVATAR_ALIAS_PATTERN = re.compile(r"(?<!\S)@self(?!\S)", re.IGNORECASE)
 
 
 def detect_mime_type(data: bytes) -> str:
-    """根據魔數（Magic Numbers）盡力檢測 MIME 型別。"""
+    """Detect MIME type from image magic numbers."""
 
     if data.startswith(b"\xff\xd8"):
         return "image/jpeg"
@@ -51,48 +53,46 @@ def detect_mime_type(data: bytes) -> str:
 
 
 def _sync_convert_image_format(image_data: bytes, mime_type: str) -> ImageData:
-    """同步將不支援的圖像轉換為 JPEG。"""
+    """Synchronously convert unsupported image formats to JPEG."""
 
     try:
         img = Image.open(BytesIO(image_data))
 
         if img.mode in ("RGBA", "LA", "P"):
             background = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "P":
-                img = img.convert("RGBA")
-            elif img.mode == "LA":
+            if img.mode in ("P", "LA"):
                 img = img.convert("RGBA")
             background.paste(img, mask=img.split()[3])
             img = background
 
         output = BytesIO()
         img.save(output, format="JPEG", quality=95)
-        logger.debug("[ImageGen] 已將圖像轉換為 JPEG")
+        logger.debug("[ImageGen] Converted image to JPEG")
         return ImageData(data=output.getvalue(), mime_type="image/jpeg")
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"[ImageGen] 圖像轉換失敗: {exc}")
+        logger.error(f"[ImageGen] Failed to convert image format: {exc}")
         return ImageData(data=image_data, mime_type=mime_type)
 
 
 async def convert_image_format(image_data: bytes, mime_type: str) -> ImageData:
-    """如果 MIME 型別不支援，則轉換圖像。"""
+    """Convert an image when the MIME type is unsupported."""
 
     real_mime = detect_mime_type(image_data)
     if real_mime in SUPPORTED_IMAGE_FORMATS:
         return ImageData(data=image_data, mime_type=real_mime)
-    logger.info(f"[ImageGen] 正在轉換圖像格式: {mime_type} -> image/jpeg")
+    logger.info(f"[ImageGen] Converting image format: {mime_type} -> image/jpeg")
     return await asyncio.to_thread(_sync_convert_image_format, image_data, mime_type)
 
 
 async def convert_images_batch(images: Iterable[ImageData]) -> list[ImageData]:
-    """並行批次轉換圖像。"""
+    """Convert a batch of images concurrently."""
 
     tasks = [convert_image_format(img.data, img.mime_type) for img in images]
     return await asyncio.gather(*tasks)
 
 
 def validate_aspect_ratio(value: str | None) -> str | None:
-    """驗證寬高比是否在允許的集合中。"""
+    """Validate an aspect ratio against the allowed values."""
 
     if value is None:
         return None
@@ -100,11 +100,26 @@ def validate_aspect_ratio(value: str | None) -> str | None:
 
 
 def validate_resolution(value: str | None) -> str | None:
-    """驗證解析度是否在允許的集合中。"""
+    """Validate a resolution against the allowed values."""
 
     if value is None:
         return None
     return value if value in ALLOWED_RESOLUTIONS else None
+
+
+def extract_self_avatar_alias(prompt: str) -> tuple[str, bool]:
+    """Strip the ``@self`` alias from a prompt and report whether it was used."""
+
+    if not prompt:
+        return "", False
+
+    used_alias = bool(SELF_AVATAR_ALIAS_PATTERN.search(prompt))
+    if not used_alias:
+        return prompt.strip(), False
+
+    cleaned_prompt = SELF_AVATAR_ALIAS_PATTERN.sub(" ", prompt)
+    cleaned_prompt = re.sub(r"\s+", " ", cleaned_prompt).strip()
+    return cleaned_prompt, True
 
 
 def mask_sensitive(
@@ -113,17 +128,8 @@ def mask_sensitive(
     min_length: int = MASK_MIN_LENGTH,
     placeholder: str = MASK_PLACEHOLDER,
 ) -> str:
-    """對敏感資訊進行脫敏處理。
+    """Mask a sensitive string for logs."""
 
-    Args:
-        value: 需要脫敏的字串
-        visible_chars: 兩端顯示的字元數
-        min_length: 需要脫敏的最小長度
-        placeholder: 中間的佔位符
-
-    Returns:
-        脫敏後的字串
-    """
     if len(value) <= min_length:
         return placeholder
     return f"{value[:visible_chars]}{placeholder}{value[-visible_chars:]}"

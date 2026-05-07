@@ -23,6 +23,184 @@ if TYPE_CHECKING:
     pass
 
 
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _resolve_aspect_ratio(
+    prompt: str, requested: str | None, fallback: str | None
+) -> str | None:
+    requested_value = (requested or "").strip()
+    if requested_value and requested_value != "自動":
+        return requested_value
+
+    normalized = prompt.lower()
+
+    if _contains_any(
+        normalized,
+        (
+            "21:9",
+            "ultrawide",
+            "ultra-wide",
+            "cinematic",
+            "panorama",
+            "panoramic",
+            "全景",
+            "超寬",
+            "寬銀幕",
+            "電影感",
+        ),
+    ):
+        return "21:9"
+
+    if _contains_any(
+        normalized,
+        (
+            "9:16",
+            "手機桌布",
+            "手機壁紙",
+            "手機背景",
+            "直式",
+            "豎式",
+            "縱向",
+            "限時動態",
+            "story",
+            "stories",
+            "reels",
+            "shorts",
+            "tiktok",
+            "phone wallpaper",
+            "mobile wallpaper",
+            "vertical poster",
+        ),
+    ):
+        return "9:16"
+
+    if _contains_any(
+        normalized,
+        (
+            "1:1",
+            "頭像",
+            "大頭貼",
+            "avatar",
+            "icon",
+            "logo",
+            "貼圖",
+            "sticker",
+            "表情圖",
+            "emoji",
+            "方形",
+        ),
+    ):
+        return "1:1"
+
+    if _contains_any(
+        normalized,
+        (
+            "16:9",
+            "橫幅",
+            "banner",
+            "封面",
+            "縮圖",
+            "thumbnail",
+            "header",
+            "hero image",
+            "desktop wallpaper",
+            "桌面壁紙",
+            "桌布",
+            "橫式",
+            "youtube",
+        ),
+    ):
+        return "16:9"
+
+    if _contains_any(
+        normalized,
+        (
+            "海報",
+            "poster",
+            "宣傳圖",
+            "角色卡",
+            "立繪",
+            "全身像",
+            "book cover",
+        ),
+    ):
+        return "3:4"
+
+    fallback_value = (fallback or "").strip()
+    if fallback_value and fallback_value != "自動":
+        return fallback_value
+    if requested_value:
+        return requested_value
+    return fallback_value or None
+
+
+def _resolve_resolution(
+    prompt: str, requested: str | None, fallback: str | None
+) -> str | None:
+    requested_value = (requested or "").strip()
+    if requested_value:
+        return requested_value
+
+    normalized = prompt.lower()
+
+    if _contains_any(
+        normalized,
+        (
+            "4k",
+            "uhd",
+            "超高解析",
+            "超高畫質",
+            "超清",
+            "列印",
+            "印刷",
+            "print",
+        ),
+    ):
+        return "4K"
+
+    if _contains_any(
+        normalized,
+        (
+            "2k",
+            "高解析",
+            "高畫質",
+            "高清",
+            "細節",
+            "detail",
+            "detailed",
+            "桌布",
+            "壁紙",
+            "海報",
+            "banner",
+            "封面",
+            "縮圖",
+            "wallpaper",
+        ),
+    ):
+        return "2K"
+
+    if _contains_any(
+        normalized,
+        (
+            "頭像",
+            "大頭貼",
+            "avatar",
+            "icon",
+            "logo",
+            "貼圖",
+            "sticker",
+            "表情圖",
+            "emoji",
+        ),
+    ):
+        return "1K"
+
+    fallback_value = (fallback or "").strip()
+    return fallback_value or "1K"
+
+
 @pydantic_dataclass
 class ImageGenerationTool(FunctionTool[AstrAgentContext]):
     """LLM 可呼叫的圖像生成工具。"""
@@ -43,7 +221,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "aspect_ratio": {
                     "type": "string",
-                    "description": "目標圖片寬高比；若無法確定請使用「自動」。",
+                    "description": "目標圖片寬高比；請根據使用情境主動選擇，例如頭像或貼圖用 1:1、手機桌布用 9:16、橫幅或縮圖用 16:9、海報用 3:4。只有完全無法判斷時才使用「自動」。",
                     "enum": [
                         "自動",
                         "1:1",
@@ -61,7 +239,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "目標圖片品質或解析度，預設為「1K」。",
+                    "description": "目標圖片品質或解析度；一般圖片可用 1K，需要更高細節的桌布、海報、封面可優先選 2K，明確要求超高畫質或列印用途時可選 4K。",
                     "enum": ["1K", "2K", "4K"],
                     "default": "1K",
                 },
@@ -182,16 +360,28 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
             f"{time.time()}{event.unified_msg_origin}".encode()
         ).hexdigest()[:8]
 
+        aspect_ratio = _resolve_aspect_ratio(
+            prompt,
+            kwargs.get("aspect_ratio"),
+            plugin.config_manager.default_aspect_ratio,
+        )
+        resolution = _resolve_resolution(
+            prompt,
+            kwargs.get("resolution"),
+            plugin.config_manager.default_resolution,
+        )
+        logger.info(
+            f"[ImageGen] 工具呼叫解析參數: aspect_ratio={aspect_ratio}, resolution={resolution}"
+        )
+
         # 建立後臺任務進行生圖
         plugin.create_background_task(
             plugin._generate_and_send_image_async(
                 prompt=prompt,
                 images_data=images_data or None,
                 unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=kwargs.get("aspect_ratio")
-                or plugin.config_manager.default_aspect_ratio,
-                resolution=kwargs.get("resolution")
-                or plugin.config_manager.default_resolution,
+                aspect_ratio=aspect_ratio or plugin.config_manager.default_aspect_ratio,
+                resolution=resolution or plugin.config_manager.default_resolution,
                 task_id=task_id,
             )
         )

@@ -27,7 +27,12 @@ from .core.safety_auditor import SafetyAuditor
 from .core.task_manager import TaskManager
 from .core.types import GenerationRequest, ImageCapability, ImageData
 from .core.usage_manager import UsageManager
-from .core.utils import mask_sensitive, validate_aspect_ratio, validate_resolution
+from .core.utils import (
+    extract_self_avatar_alias,
+    mask_sensitive,
+    validate_aspect_ratio,
+    validate_resolution,
+)
 
 
 class ImageGenerationPlugin(Star):
@@ -46,6 +51,12 @@ class ImageGenerationPlugin(Star):
 當意圖明確時要主動使用工具，不需要先詢問確認。
 如果缺少關鍵視覺細節，請根據現有上下文合理補全提示詞。
 請忠實保留使用者的原始創作意圖。
+請主動根據使用者需求判斷合適的寬高比與解析度，不要預設一直使用「自動」。
+- 頭像、貼圖、Logo、表情圖通常用 1:1
+- 手機桌布、限時動態、直式海報通常用 9:16
+- 橫幅、縮圖、封面、桌面桌布通常用 16:9
+- 海報、角色立繪、宣傳圖通常用 3:4
+- 一般圖片可用 1K，需要更高細節可用 2K，明確要求超高畫質或列印用途可用 4K
 如果使用者只是想要說明、比較或規劃，則不要呼叫工具。
 """.strip()
 
@@ -82,6 +93,7 @@ class ImageGenerationPlugin(Star):
         # 初始化生成器
         self.generator: ImageGenerator | None = None
         self.semaphore: asyncio.Semaphore | None = None
+        self._active_generation_tasks: dict[str, dict[str, Any]] = {}
 
     # ---------------------- 生命週期 ----------------------
 
@@ -185,6 +197,15 @@ class ImageGenerationPlugin(Star):
         """建立後臺任務並新增到管理器中。"""
         return self.task_manager.create_task(coro)
 
+    async def _notify_generation_failure(
+        self, unified_msg_origin: str, reason: str
+    ) -> None:
+        """通知使用者生圖失敗。"""
+        await self.context.send_message(
+            unified_msg_origin,
+            MessageChain().message(f"❌ 生成失敗：{reason}"),
+        )
+
     async def _refresh_platform_commands(self) -> None:
         """重新整理支援命令註冊的平台指令。"""
         for platform in self.context.platform_manager.platform_insts:
@@ -211,6 +232,10 @@ class ImageGenerationPlugin(Star):
     ) -> None:
         """非同步生成圖片併傳送。"""
         if not self.generator or not self.generator.adapter:
+            await self.context.send_message(
+                unified_msg_origin,
+                MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
+            )
             return
 
         capabilities = self.generator.adapter.get_capabilities()
@@ -239,6 +264,16 @@ class ImageGenerationPlugin(Star):
                 f"{time.time()}{unified_msg_origin}".encode()
             ).hexdigest()[:8]
 
+        mode = "圖生圖" if images_data else "文生圖"
+        self._active_generation_tasks[task_id] = {
+            "mode": mode,
+            "prompt_preview": prompt[:40] + ("..." if len(prompt) > 40 else ""),
+            "started_at": time.time(),
+            "user": unified_msg_origin,
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        }
+
         final_ar = validate_aspect_ratio(aspect_ratio) or None
         if final_ar == "自動":
             final_ar = None
@@ -250,16 +285,28 @@ class ImageGenerationPlugin(Star):
                 images.append(ImageData(data=data, mime_type=mime))
 
         # 使用訊號量控制併發
-        if self.semaphore is None:
-            await self._do_generate_and_send(
-                prompt, unified_msg_origin, images, final_ar, final_res, task_id
-            )
-            return
+        try:
+            if self.semaphore is None:
+                await self._do_generate_and_send(
+                    prompt, unified_msg_origin, images, final_ar, final_res, task_id
+                )
+                return
 
-        async with self.semaphore:
-            await self._do_generate_and_send(
-                prompt, unified_msg_origin, images, final_ar, final_res, task_id
+            async with self.semaphore:
+                await self._do_generate_and_send(
+                    prompt, unified_msg_origin, images, final_ar, final_res, task_id
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"[ImageGen] 任務 {task_id} 執行過程發生未預期錯誤: {exc}",
+                exc_info=True,
             )
+            await self._notify_generation_failure(
+                unified_msg_origin,
+                str(exc) or "生圖服務發生未預期錯誤",
+            )
+        finally:
+            self._active_generation_tasks.pop(task_id, None)
 
     async def _do_generate_and_send(
         self,
@@ -291,10 +338,7 @@ class ImageGenerationPlugin(Star):
             logger.error(
                 f"[ImageGen] 任務 {task_id} 生成失敗，耗時: {duration:.2f}s, 錯誤: {result.error}"
             )
-            await self.context.send_message(
-                unified_msg_origin,
-                MessageChain().message(f"❌ 生成失敗：{result.error}"),
-            )
+            await self._notify_generation_failure(unified_msg_origin, result.error)
             return
 
         logger.info(
@@ -302,6 +346,10 @@ class ImageGenerationPlugin(Star):
         )
 
         if not result.images:
+            logger.warning(f"[ImageGen] 任務 {task_id} 未返回任何圖片資料")
+            await self._notify_generation_failure(
+                unified_msg_origin, "服務未返回任何圖片資料"
+            )
             return
 
         generated_file_paths: list[str] = []
@@ -312,6 +360,9 @@ class ImageGenerationPlugin(Star):
 
         if not generated_file_paths:
             logger.warning(f"[ImageGen] 任務 {task_id} 未能儲存任何生成圖片")
+            await self._notify_generation_failure(
+                unified_msg_origin, "生成完成，但圖片儲存失敗"
+            )
             return
 
         # 生圖後圖片稽核
@@ -427,6 +478,8 @@ class ImageGenerationPlugin(Star):
             if extra_content:
                 prompt = f"{prompt} {extra_content}"
 
+        prompt, use_self_avatar = extract_self_avatar_alias(prompt)
+
         if not prompt:
             yield event.plain_result("❌ 請提供提示詞或預設名稱。")
             return
@@ -449,6 +502,16 @@ class ImageGenerationPlugin(Star):
             )
         ):
             images_data = await self.image_processor.fetch_images_from_event(event)
+            if use_self_avatar:
+                self_id = str(event.get_self_id()).strip()
+                if self_id:
+                    avatar_data = await self.image_processor.get_avatar(self_id)
+                    if avatar_data:
+                        images_data.append((avatar_data, "image/jpeg"))
+                    else:
+                        logger.warning(
+                            "[ImageGen] @self alias was used, but the bot avatar could not be loaded"
+                        )
 
         msg = "已啟動生圖任務"
         if images_data:
@@ -469,6 +532,33 @@ class ImageGenerationPlugin(Star):
                 task_id=task_id,
             )
         )
+
+    @filter.command("img_tasks", desc="查看進行中的生圖任務")
+    async def image_tasks_command(self, event: AstrMessageEvent):
+        """查看目前進行中的生圖任務。"""
+        if not self._active_generation_tasks:
+            yield event.plain_result("目前沒有正在進行中的生圖任務")
+            return
+
+        now = time.time()
+        lines = [f"目前共有 {len(self._active_generation_tasks)} 個生圖任務進行中："]
+
+        sorted_tasks = sorted(
+            self._active_generation_tasks.items(),
+            key=lambda item: item[1]["started_at"],
+        )
+        for index, (task_id, info) in enumerate(sorted_tasks, 1):
+            elapsed = max(0, int(now - float(info["started_at"])))
+            requester = mask_sensitive(str(info["user"]))
+            lines.append(
+                f"{index}. {info['mode']} | 任務 ID：{task_id} | 已執行：{elapsed} 秒 | 使用者：{requester}"
+            )
+            lines.append(
+                f"   比例：{info['aspect_ratio']} | 解析度：{info['resolution']}"
+            )
+            lines.append(f"   提示詞：{info['prompt_preview']}")
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("img_model", desc="切換生圖模型")
     async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
