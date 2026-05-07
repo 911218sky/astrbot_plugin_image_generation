@@ -119,31 +119,28 @@ class BaseImageAdapter(abc.ABC):
             if images is not None:
                 if attempt > 1:
                     logger.info(
-                        f"{prefix} Generation succeeded on attempt "
-                        f"{attempt}/{self.max_retry_attempts}"
+                        f"{prefix} 第 {attempt}/{self.max_retry_attempts} 次重試後生成成功"
                     )
                 return GenerationResult(images=images, error=None)
 
             last_error = err or "生成失敗"
             logger.warning(
-                f"{prefix} Attempt {attempt}/{self.max_retry_attempts} failed: "
+                f"{prefix} 第 {attempt}/{self.max_retry_attempts} 次嘗試失敗: "
                 f"{last_error}"
             )
             if attempt < self.max_retry_attempts:
                 self._rotate_api_key()
                 logger.info(
-                    f"{prefix} Retry {attempt + 1}/{self.max_retry_attempts} scheduled"
+                    f"{prefix} 已排程第 {attempt + 1}/{self.max_retry_attempts} 次重試"
                 )
                 # 輪換 Key 時進行指數退避
                 if attempt % max(1, len(self.api_keys)) == 0:
                     backoff_seconds = min(2 ** (attempt // len(self.api_keys)), 10)
-                    logger.info(
-                        f"{prefix} Backing off for {backoff_seconds}s before retry"
-                    )
+                    logger.info(f"{prefix} 重試前等待 {backoff_seconds} 秒")
                     await asyncio.sleep(backoff_seconds)
 
         logger.error(
-            f"{prefix} All {self.max_retry_attempts} attempts failed: {last_error}"
+            f"{prefix} 已達最大重試次數 {self.max_retry_attempts} 次，最終失敗: {last_error}"
         )
         return GenerationResult(images=None, error=last_error)
 

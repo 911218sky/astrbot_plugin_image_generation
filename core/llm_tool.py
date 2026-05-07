@@ -12,6 +12,7 @@ from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
 from astrbot.api import logger
+from astrbot.api.event import MessageChain
 from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
@@ -196,7 +197,12 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         )
 
         mode = "圖生圖" if images_data else "文生圖"
-        return f"✅ 已啟動{mode}任務 (任務ID: {task_id})"
+        notice = f"✅ 已啟動{mode}任務（任務 ID：{task_id}）"
+        await plugin.context.send_message(
+            event.unified_msg_origin,
+            MessageChain().message(notice),
+        )
+        return notice
 
 
 def adjust_tool_parameters(
