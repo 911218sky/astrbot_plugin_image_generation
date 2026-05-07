@@ -30,7 +30,7 @@ class SafetyAuditor:
 
         hit = self._match_blocked_word(prompt, settings.blocked_words)
         if hit:
-            return False, f"命中屏蔽词: {hit}"
+            return False, f"命中遮蔽詞: {hit}"
 
         if not settings.enable_ai_audit:
             return True, ""
@@ -90,8 +90,8 @@ class SafetyAuditor:
 
         if not review_prompt:
             review_prompt = (
-                "请根据输入内容完成安全审核。"
-                '仅输出 JSON：{"allow": true/false, "reason": "简短原因"}。'
+                "請根據輸入內容完成安全稽核。"
+                '僅輸出 JSON：{"allow": true/false, "reason": "簡短原因"}。'
             )
 
         if self.PROMPT_PLACEHOLDER in review_prompt:
@@ -100,8 +100,8 @@ class SafetyAuditor:
         if not append_prompt_if_missing_placeholder or not prompt:
             return review_prompt
 
-        # 兼容旧的提示词审核配置：即使没有占位符，也会附加当前提示词给审核模型。
-        return f"{review_prompt}\n\n用户提示词：\n{prompt}"
+        # 相容舊的提示詞稽核配置：即使沒有佔位符，也會附加當前提示詞給稽核模型。
+        return f"{review_prompt}\n\n使用者提示詞：\n{prompt}"
 
     async def _audit_with_model(
         self,
@@ -116,14 +116,14 @@ class SafetyAuditor:
             provider = self._context.get_provider_by_id(provider_id)
             if not provider:
                 logger.warning(
-                    f"[ImageGen] 未找到审核 Provider ID: {provider_id}，将回退到当前会话模型"
+                    f"[ImageGen] 未找到稽核 Provider ID: {provider_id}，將回退到當前會話模型"
                 )
 
         if provider is None:
             provider = self._context.get_using_provider(unified_msg_origin)
 
         if not provider:
-            msg = "安全审核异常：未找到可用审核模型"
+            msg = "安全稽核異常：未找到可用稽核模型"
             logger.warning(f"[ImageGen] {msg}")
             return False, msg
 
@@ -137,7 +137,7 @@ class SafetyAuditor:
             decision, reason = self._parse_audit_response(completion_text)
             return decision, reason
         except Exception as exc:
-            msg = f"安全审核异常：模型调用失败 - {str(exc)[:180]}"
+            msg = f"安全稽核異常：模型呼叫失敗 - {str(exc)[:180]}"
             logger.warning(f"[ImageGen] {msg}")
             return False, msg
 
@@ -150,25 +150,25 @@ class SafetyAuditor:
 
     def _parse_audit_response(self, text: str) -> tuple[bool, str]:
         if not text:
-            return False, "安全审核异常：模型返回为空"
+            return False, "安全稽核異常：模型返回為空"
 
         payload = self._extract_json(text)
         if payload is not None:
             allow = self._to_bool(payload.get("allow"))
             reason = str(payload.get("reason") or "").strip()
             if allow is not None:
-                return allow, reason or ("审核通过" if allow else "审核未通过")
+                return allow, reason or ("稽核透過" if allow else "稽核未透過")
 
         lowered = text.lower()
-        reject_tokens = ("reject", "deny", "forbid", "不通过", "违规", "拒绝", "不允许")
-        allow_tokens = ("allow", "pass", "safe", "通过", "安全", "允许")
+        reject_tokens = ("reject", "deny", "forbid", "不透過", "違規", "拒絕", "不允許")
+        allow_tokens = ("allow", "pass", "safe", "透過", "安全", "允許")
 
         if any(token in lowered for token in reject_tokens):
             return False, text[:120]
         if any(token in lowered for token in allow_tokens):
             return True, text[:120]
 
-        return False, f"安全审核异常：无法判定审核结果，原始返回: {text[:120]}"
+        return False, f"安全稽核異常：無法判定稽核結果，原始返回: {text[:120]}"
 
     def _extract_json(self, text: str) -> dict[str, object] | None:
         text = text.strip()
@@ -195,9 +195,9 @@ class SafetyAuditor:
             return value
         if isinstance(value, str):
             lowered = value.strip().lower()
-            if lowered in {"true", "1", "yes", "allow", "pass", "通过", "允许"}:
+            if lowered in {"true", "1", "yes", "allow", "pass", "透過", "允許"}:
                 return True
-            if lowered in {"false", "0", "no", "reject", "deny", "拒绝", "不通过"}:
+            if lowered in {"false", "0", "no", "reject", "deny", "拒絕", "不透過"}:
                 return False
         if isinstance(value, (int, float)):
             return bool(value)

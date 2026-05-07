@@ -1,5 +1,5 @@
 """
-图片处理模块 - 下载、提取、缓存管理
+圖片處理模組 - 下載、提取、快取管理
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 
 class ImageProcessor:
-    """图片处理器 - 负责图片下载、提取和缓存管理。"""
+    """圖片處理器 - 負責圖片下載、提取和快取管理。"""
 
     def __init__(self, cache_dir: str, max_image_size_mb: int, max_cache_count: int):
         self._cache_dir = cache_dir
@@ -26,13 +26,13 @@ class ImageProcessor:
         self._ensure_cache_dir()
 
     def _ensure_cache_dir(self) -> None:
-        """确保缓存目录存在。"""
+        """確保快取目錄存在。"""
         os.makedirs(self._cache_dir, exist_ok=True)
 
     def update_settings(
         self, max_image_size_mb: int | None = None, max_cache_count: int | None = None
     ) -> None:
-        """更新设置。"""
+        """更新設定。"""
         if max_image_size_mb is not None:
             self._max_image_size_mb = max_image_size_mb
         if max_cache_count is not None:
@@ -40,18 +40,18 @@ class ImageProcessor:
 
     @property
     def cache_dir(self) -> str:
-        """获取缓存目录路径。"""
+        """取得快取目錄路徑。"""
         return self._cache_dir
 
     async def download_image(self, url: str) -> tuple[bytes, str] | None:
-        """下载图片并返回二进制数据和 MIME 类型。"""
+        """下載圖片並返回二進位制資料和 MIME 型別。"""
         try:
             data: bytes | None = None
             if os.path.exists(url) and os.path.isfile(url):
                 with open(url, "rb") as f:
                     data = f.read()
             else:
-                # 使用插件缓存目录
+                # 使用插件快取目錄
                 file_name = f"ref_{hashlib.md5(url.encode()).hexdigest()[:10]}"
                 path = os.path.join(self._cache_dir, file_name)
                 path = await download_image_by_url(url, path=path)
@@ -64,18 +64,18 @@ class ImageProcessor:
 
             if len(data) > self._max_image_size_mb * 1024 * 1024:
                 logger.warning(
-                    f"[ImageGen] 图片超过大小限制 ({self._max_image_size_mb}MB)"
+                    f"[ImageGen] 圖片超過大小限制 ({self._max_image_size_mb}MB)"
                 )
                 return None
 
             mime = self._detect_mime_type(data)
             return data, mime
         except Exception as exc:
-            logger.error(f"[ImageGen] 获取图片失败 (URL/Path: {url}): {exc}")
+            logger.error(f"[ImageGen] 取得圖片失敗 (URL/Path: {url}): {exc}")
         return None
 
     def _detect_mime_type(self, data: bytes) -> str:
-        """检测图片 MIME 类型。"""
+        """檢測圖片 MIME 型別。"""
         if data.startswith(b"\xff\xd8"):
             return "image/jpeg"
         elif data.startswith(b"GIF"):
@@ -85,7 +85,7 @@ class ImageProcessor:
         return "image/png"
 
     async def get_avatar(self, user_id: str) -> bytes | None:
-        """获取用户头像。"""
+        """取得使用者頭像。"""
         url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
         try:
             file_name = f"avatar_{user_id}.jpg"
@@ -95,19 +95,19 @@ class ImageProcessor:
                 with open(path, "rb") as f:
                     return f.read()
         except Exception as e:
-            logger.debug(f"[ImageGen] 获取头像失败 (user_id={user_id}): {e}")
+            logger.debug(f"[ImageGen] 取得頭像失敗 (user_id={user_id}): {e}")
         return None
 
     async def fetch_images_from_event(
         self, event: AstrMessageEvent
     ) -> list[tuple[bytes, str]]:
-        """从消息事件中提取图片（包括直接发送的图片、引用消息中的图片、被@用户的头像）。"""
+        """從訊息事件中提取圖片（包括直接傳送的圖片、引用訊息中的圖片、被@使用者的頭像）。"""
         images_data: list[tuple[bytes, str]] = []
 
         if not event.message_obj or not event.message_obj.message:
             return images_data
 
-        # 预扫描：记录引用消息的发送者以及各个 @ 出现次数，用于过滤自动 @
+        # 預掃描：記錄引用訊息的傳送者以及各個 @ 出現次數，用於過濾自動 @
         reply_sender_id = None
         at_counts: dict[str, int] = {}
 
@@ -123,12 +123,12 @@ class ImageProcessor:
         for component in event.message_obj.message:
             try:
                 if isinstance(component, Comp.Image):
-                    # 处理直接发送的图片
+                    # 處理直接傳送的圖片
                     url = component.url or component.file
                     if url and (data := await self.download_image(url)):
                         images_data.append(data)
                 elif isinstance(component, Comp.Reply):
-                    # 处理引用消息中的图片
+                    # 處理引用訊息中的圖片
                     if component.chain:
                         for sub_comp in component.chain:
                             if isinstance(sub_comp, Comp.Image):
@@ -136,26 +136,26 @@ class ImageProcessor:
                                 if url and (data := await self.download_image(url)):
                                     images_data.append(data)
                 elif isinstance(component, Comp.At):
-                    # 处理 @ 用户的头像
+                    # 處理 @ 使用者的頭像
                     if hasattr(component, "qq") and component.qq != "all":
                         uid = str(component.qq)
-                        # 引用消息带来的单次自动 @ 默认忽略头像，除非用户再次显式 @
+                        # 引用訊息帶來的單次自動 @ 預設忽略頭像，除非使用者再次顯式 @
                         if reply_sender_id and uid == reply_sender_id:
                             if at_counts.get(uid, 0) == 1:
                                 continue
                         self_id = str(event.get_self_id()).strip()
-                        # 机器人单次被 @ 多为触发前缀，默认不取机器人头像
+                        # 機器人單次被 @ 多為觸發字首，預設不取機器人頭像
                         if self_id and uid == self_id and at_counts.get(uid, 0) == 1:
                             continue
                         if avatar_data := await self.get_avatar(uid):
                             images_data.append((avatar_data, "image/jpeg"))
             except Exception as e:
-                logger.error(f"[ImageGen] 提取消息组件图片失败: {e}")
+                logger.error(f"[ImageGen] 提取訊息元件圖片失敗: {e}")
                 continue
         return images_data
 
     async def cleanup_cache(self) -> None:
-        """执行缓存清理。"""
+        """執行快取清理。"""
         if not os.path.exists(self._cache_dir):
             return
 
@@ -165,10 +165,10 @@ class ImageProcessor:
             if os.path.isfile(path):
                 files.append((path, os.path.getmtime(path)))
 
-        # 按修改时间排序（旧的在前）
+        # 按修改時間排序（舊的在前）
         files.sort(key=lambda x: x[1])
 
-        # 按数量清理
+        # 按數量清理
         if len(files) > self._max_cache_count:
             to_delete = files[: len(files) - self._max_cache_count]
             deleted_count = 0
@@ -177,13 +177,13 @@ class ImageProcessor:
                     os.remove(path)
                     deleted_count += 1
                 except OSError as e:
-                    logger.debug(f"[ImageGen] 删除缓存文件失败: {path} - {e}")
+                    logger.debug(f"[ImageGen] 刪除快取檔案失敗: {path} - {e}")
             logger.info(
-                f"[ImageGen] 已清理 {deleted_count}/{len(to_delete)} 个旧缓存文件 (按数量)"
+                f"[ImageGen] 已清理 {deleted_count}/{len(to_delete)} 箇舊快取檔案 (按數量)"
             )
 
     def save_generated_image(self, task_id: str, img_bytes: bytes) -> str | None:
-        """保存生成的图片到缓存目录，返回文件路径。"""
+        """儲存生成的圖片到快取目錄，返回檔案路徑。"""
         try:
             import time
 
@@ -193,5 +193,5 @@ class ImageProcessor:
                 f.write(img_bytes)
             return file_path
         except Exception as exc:
-            logger.error(f"[ImageGen] 保存图片失败: {exc}")
+            logger.error(f"[ImageGen] 儲存圖片失敗: {exc}")
             return None

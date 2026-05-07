@@ -1,6 +1,6 @@
 """
 Adapter module for image generation plugin
-图像生成插件的适配器模块
+圖像生成插件的適配器模組
 """
 
 from .gemini_adapter import GeminiAdapter

@@ -1,5 +1,5 @@
 """
-AstrBot 图像生成插件主模块
+AstrBot 圖像生成插件主模組
 
 """
 
@@ -14,6 +14,7 @@ from typing import Any
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
+from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.star_tools import StarTools
@@ -30,13 +31,29 @@ from .core.utils import mask_sensitive, validate_aspect_ratio, validate_resoluti
 
 
 class ImageGenerationPlugin(Star):
-    """图像生成插件主类"""
+    """圖像生成插件主類"""
+
+    LLM_TOOL_SYSTEM_PROMPT = """
+# 圖像生成工具規則
+
+當使用者希望最終產出是一張圖片時，優先呼叫 `generate_image` 工具，而不是只回覆文字。
+
+當使用者要求以下內容時，應呼叫 `generate_image`：
+- 建立圖片、繪圖、生成插畫或任何視覺內容
+- 編輯、重繪、轉換、延伸或重製既有圖片
+- 製作頭像、貼圖、迷因、縮圖、海報、人像、商品圖、設定圖、九宮格或表情圖
+
+當意圖明確時要主動使用工具，不需要先詢問確認。
+如果缺少關鍵視覺細節，請根據現有上下文合理補全提示詞。
+請忠實保留使用者的原始創作意圖。
+如果使用者只是想要說明、比較或規劃，則不要呼叫工具。
+""".strip()
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.context = context
 
-        # 数据目录配置
+        # 資料目錄配置
         self.data_dir = StarTools.get_data_dir()
         self.cache_dir = self.data_dir / "cache"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -44,70 +61,72 @@ class ImageGenerationPlugin(Star):
         # 初始化配置管理器
         self.config_manager = ConfigManager(config)
 
-        # 初始化使用数据管理器
+        # 初始化使用資料管理器
         self.usage_manager = UsageManager(
             str(self.data_dir), self.config_manager.usage_settings
         )
 
-        # 初始化图片处理器
+        # 初始化圖片處理器
         self.image_processor = ImageProcessor(
             str(self.cache_dir),
             self.config_manager.usage_settings.max_image_size_mb,
             self.config_manager.cache_settings.max_cache_count,
         )
 
-        # 初始化任务管理器
+        # 初始化工作管理員
         self.task_manager = TaskManager()
 
-        # 初始化安全审核器
+        # 初始化安全稽核器
         self.safety_auditor = SafetyAuditor(self.context, self.config_manager)
 
         # 初始化生成器
         self.generator: ImageGenerator | None = None
         self.semaphore: asyncio.Semaphore | None = None
 
-    # ---------------------- 生命周期 ----------------------
+    # ---------------------- 生命週期 ----------------------
 
     async def initialize(self):
-        """插件加载时调用"""
+        """插件載入時呼叫"""
         if self.config_manager.adapter_config:
             self.generator = ImageGenerator(self.config_manager.adapter_config)
             self.semaphore = asyncio.Semaphore(self.config_manager.max_concurrent_tasks)
         else:
-            logger.error("[ImageGen] 适配器配置加载失败，插件未初始化")
+            logger.error("[ImageGen] 適配器配置載入失敗，插件未初始化")
 
-        # 注册 LLM 工具
+        # 註冊 LLM 工具
         if self.config_manager.enable_llm_tool and self.generator:
             tool = ImageGenerationTool(plugin=self)
             self._adjust_tool_parameters(tool)
             self.context.add_llm_tools(tool)
-            logger.info("[ImageGen] 已注册图像生成工具")
+            logger.info("[ImageGen] 已註冊圖像生成工具")
 
-        # 配置定时任务
+        # 配置定時任務
         self._setup_tasks()
 
-        # 执行启动任务（在后台异步执行）
+        # 執行啟動任務（在後臺非同步執行）
         self.task_manager.create_task(self.task_manager.run_startup_tasks())
+        await self._refresh_platform_commands()
 
         logger.info(
-            f"[ImageGen] 插件加载完成，模型: {self.config_manager.adapter_config.model if self.config_manager.adapter_config else '未知'}"
+            f"[ImageGen] 插件載入完成，模型: {self.config_manager.adapter_config.model if self.config_manager.adapter_config else '未知'}"
         )
 
     async def terminate(self):
-        """插件卸载时调用"""
+        """插件解除安裝時呼叫"""
         try:
             if self.generator:
                 await self.generator.close()
             await self.task_manager.cancel_all()
-            logger.info("[ImageGen] 插件已卸载")
+            await self._refresh_platform_commands()
+            logger.info("[ImageGen] 插件已解除安裝")
         except Exception as exc:
-            logger.error(f"[ImageGen] 卸载清理出错: {exc}")
+            logger.error(f"[ImageGen] 解除安裝清理出錯: {exc}")
 
-    # ---------------------- 内部工具 ----------------------
+    # ---------------------- 內部工具 ----------------------
 
     def _setup_tasks(self) -> None:
-        """配置并启动定时任务。"""
-        # 1. 缓存清理任务
+        """配置並啟動定時任務。"""
+        # 1. 快取清理任務
         self.task_manager.start_loop_task(
             name="cache_cleanup",
             coro_func=self.image_processor.cleanup_cache,
@@ -116,57 +135,70 @@ class ImageGenerationPlugin(Star):
             run_immediately=True,
         )
 
-        # 2. Jimeng2API 自动领积分任务
+        # 2. Jimeng2API 自動領積分任務
         self._setup_jimeng_token_task()
 
     def _setup_jimeng_token_task(self) -> None:
-        """配置即梦自动领积分任务。
+        """配置即夢自動領積分任務。
 
-        该任务会：
-        1. 在插件启动时执行一次（通过启动任务）
-        2. 每天日期变更时自动执行（通过每日任务）
+        該任務會：
+        1. 在插件啟動時執行一次（透過啟動任務）
+        2. 每天日期變更時自動執行（透過每日任務）
 
-        注意：只要配置中包含即梦渠道，就会启用该任务，
-        无论当前使用的是哪个渠道。
+        注意：只要配置中包含即夢渠道，就會啟用該任務，
+        無論當前使用的是哪個渠道。
         """
         from .adapter.jimeng2api_adapter import Jimeng2APIAdapter
         from .core.types import AdapterType
 
-        # 检查配置中是否包含即梦渠道（而非检查当前适配器）
+        # 檢查配置中是否包含即夢渠道（而非檢查當前適配器）
         jimeng_config = self.config_manager.get_provider_config(AdapterType.JIMENG2API)
         if not jimeng_config:
             return
 
-        # 创建专门用于任务的即梦适配器实例
+        # 建立專門用於任務的即夢適配器例項
         jimeng_adapter = Jimeng2APIAdapter(jimeng_config)
 
-        # 1. 注册为启动任务，插件启动时执行一次
+        # 1. 註冊為啟動任務，插件啟動時執行一次
         self.task_manager.register_startup_task(
             name="jimeng_token_receive",
             coro_func=jimeng_adapter.receive_token,
         )
 
-        # 2. 注册为每日任务，日期变更时执行
+        # 2. 註冊為每日任務，日期變更時執行
         self.task_manager.start_daily_task(
             name="jimeng_token_receive",
             coro_func=jimeng_adapter.receive_token,
-            check_interval_seconds=300,  # 每5分钟检查一次日期变更
-            run_immediately=False,  # 启动任务已处理，无需重复执行
+            check_interval_seconds=300,  # 每5分鐘檢查一次日期變更
+            run_immediately=False,  # 啟動任務已處理，無需重複執行
         )
-        logger.info("[ImageGen] 已配置即梦2API自动领积分任务（启动时+每日）")
+        logger.info("[ImageGen] 已配置即夢2API自動領積分任務（啟動時+每日）")
 
     def _adjust_tool_parameters(self, tool: ImageGenerationTool) -> None:
-        """根据适配器能力动态调整工具参数。"""
+        """根據適配器能力動態調整工具引數。"""
         if not self.generator or not self.generator.adapter:
             return
         capabilities = self.generator.adapter.get_capabilities()
         adjust_tool_parameters(tool, capabilities)
 
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
-        """创建后台任务并添加到管理器中。"""
+        """建立後臺任務並新增到管理器中。"""
         return self.task_manager.create_task(coro)
 
-    # ---------------------- 核心生图逻辑 ----------------------
+    async def _refresh_platform_commands(self) -> None:
+        """重新整理支援命令註冊的平台指令。"""
+        for platform in self.context.platform_manager.platform_insts:
+            register_commands = getattr(platform, "register_commands", None)
+            if not callable(register_commands):
+                continue
+            try:
+                await register_commands()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    f"[ImageGen] 重新整理 {platform.meta().name} 平台指令失敗: {exc}"
+                )
+
+    # ---------------------- 核心生圖邏輯 ----------------------
 
     async def _generate_and_send_image_async(
         self,
@@ -177,28 +209,28 @@ class ImageGenerationPlugin(Star):
         resolution: str = "1K",
         task_id: str | None = None,
     ) -> None:
-        """异步生成图片并发送。"""
+        """非同步生成圖片併傳送。"""
         if not self.generator or not self.generator.adapter:
             return
 
         capabilities = self.generator.adapter.get_capabilities()
 
-        # 检查并清理不支持的参数
+        # 檢查並清理不支援的引數
         if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
             logger.warning(
-                f"[ImageGen] 当前适配器不支持参考图，已忽略 {len(images_data)} 张图片"
+                f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"
             )
             images_data = None
 
-        if not (capabilities & ImageCapability.ASPECT_RATIO) and aspect_ratio != "自动":
+        if not (capabilities & ImageCapability.ASPECT_RATIO) and aspect_ratio != "自動":
             logger.info(
-                f"[ImageGen] 当前适配器不支持指定比例，已忽略参数: {aspect_ratio}"
+                f"[ImageGen] 當前適配器不支援指定比例，已忽略參數: {aspect_ratio}"
             )
-            aspect_ratio = "自动"
+            aspect_ratio = "自動"
 
         if not (capabilities & ImageCapability.RESOLUTION) and resolution != "1K":
             logger.info(
-                f"[ImageGen] 当前适配器不支持指定分辨率，已忽略参数: {resolution}"
+                f"[ImageGen] 當前適配器不支援指定解析度，已忽略參數: {resolution}"
             )
             resolution = "1K"
 
@@ -208,7 +240,7 @@ class ImageGenerationPlugin(Star):
             ).hexdigest()[:8]
 
         final_ar = validate_aspect_ratio(aspect_ratio) or None
-        if final_ar == "自动":
+        if final_ar == "自動":
             final_ar = None
         final_res = validate_resolution(resolution)
 
@@ -217,7 +249,7 @@ class ImageGenerationPlugin(Star):
             for data, mime in images_data:
                 images.append(ImageData(data=data, mime_type=mime))
 
-        # 使用信号量控制并发
+        # 使用訊號量控制併發
         if self.semaphore is None:
             await self._do_generate_and_send(
                 prompt, unified_msg_origin, images, final_ar, final_res, task_id
@@ -238,10 +270,10 @@ class ImageGenerationPlugin(Star):
         resolution: str | None,
         task_id: str,
     ) -> None:
-        """执行生成逻辑并发送结果。"""
+        """執行生成邏輯併傳送結果。"""
         start_time = time.time()
         if not self.generator:
-            logger.warning("[ImageGen] 生成器未初始化，跳过生成请求")
+            logger.warning("[ImageGen] 生成器未初始化，跳過生成請求")
             return
         result = await self.generator.generate(
             GenerationRequest(
@@ -257,16 +289,16 @@ class ImageGenerationPlugin(Star):
 
         if result.error:
             logger.error(
-                f"[ImageGen] 任务 {task_id} 生成失败，耗时: {duration:.2f}s, 错误: {result.error}"
+                f"[ImageGen] 任務 {task_id} 生成失敗，耗時: {duration:.2f}s, 錯誤: {result.error}"
             )
             await self.context.send_message(
                 unified_msg_origin,
-                MessageChain().message(f"❌ 生成失败: {result.error}"),
+                MessageChain().message(f"❌ 生成失敗：{result.error}"),
             )
             return
 
         logger.info(
-            f"[ImageGen] 任务 {task_id} 生成成功，耗时: {duration:.2f}s, 图片数量: {len(result.images) if result.images else 0}"
+            f"[ImageGen] 任務 {task_id} 生成成功，耗時: {duration:.2f}s, 圖片數量: {len(result.images) if result.images else 0}"
         )
 
         if not result.images:
@@ -279,24 +311,24 @@ class ImageGenerationPlugin(Star):
                 generated_file_paths.append(file_path)
 
         if not generated_file_paths:
-            logger.warning(f"[ImageGen] 任务 {task_id} 未能保存任何生成图片")
+            logger.warning(f"[ImageGen] 任務 {task_id} 未能儲存任何生成圖片")
             return
 
-        # 生图后图片审核
+        # 生圖後圖片稽核
         image_allowed, image_reason = await self.safety_auditor.audit_generated_images(
             prompt=prompt,
             image_paths=generated_file_paths,
             unified_msg_origin=unified_msg_origin,
         )
         if not image_allowed:
-            logger.warning(f"[ImageGen] 任务 {task_id} 图片审核未通过: {image_reason}")
+            logger.warning(f"[ImageGen] 任務 {task_id} 圖片稽核未透過: {image_reason}")
             await self.context.send_message(
                 unified_msg_origin,
-                MessageChain().message(f"❌ 图片内容审核未通过: {image_reason}"),
+                MessageChain().message(f"❌ 圖像審核未通過：{image_reason}"),
             )
             return
 
-        # 记录使用次数
+        # 記錄使用次數
         self.usage_manager.record_usage(unified_msg_origin)
 
         chain = MessageChain()
@@ -306,18 +338,19 @@ class ImageGenerationPlugin(Star):
         info_parts = []
         if self.config_manager.show_generation_info:
             info_parts.append(
-                f"✨ 生成成功！\n📊 耗时: {duration:.2f}s\n🖼️ 数量: {len(generated_file_paths)}张"
+                f"完成。\n耗時：{duration:.2f}s\n圖片數量：{len(generated_file_paths)}"
             )
 
         if self.config_manager.show_model_info and self.config_manager.adapter_config:
             info_parts.append(
-                f"🤖 模型: {self.config_manager.adapter_config.name}/{self.config_manager.adapter_config.model}"
+                "模型："
+                f"{self.config_manager.adapter_config.name}/{self.config_manager.adapter_config.model}"
             )
 
         if self.usage_manager.is_daily_limit_enabled():
             count = self.usage_manager.get_usage_count(unified_msg_origin)
             info_parts.append(
-                f"📅 今日用量: {count}/{self.usage_manager.get_daily_limit()}"
+                f"今日用量：{count}/{self.usage_manager.get_daily_limit()}"
             )
 
         if info_parts:
@@ -325,14 +358,14 @@ class ImageGenerationPlugin(Star):
 
         await self.context.send_message(unified_msg_origin, chain)
 
-    # ---------------------- 指令处理 ----------------------
+    # ---------------------- 指令處理 ----------------------
 
-    @filter.command("生图")
+    @filter.command("img", desc="生成圖片")
     async def generate_image_command(self, event: AstrMessageEvent):
-        """处理生图指令。"""
+        """處理生圖指令。"""
         user_id = event.unified_msg_origin
 
-        # 检查频率限制和每日限制
+        # 檢查頻率限制和每日限制
         check_result = self.usage_manager.check_rate_limit(user_id)
         if isinstance(check_result, str):
             if check_result:
@@ -342,7 +375,9 @@ class ImageGenerationPlugin(Star):
         masked_uid = mask_sensitive(user_id)
 
         user_input = (event.message_str or "").strip()
-        logger.info(f"[ImageGen] 收到生图指令 - 用户: {masked_uid}, 输入: {user_input}")
+        logger.info(
+            f"[ImageGen] 收到 img 指令 - 使用者：{masked_uid}，輸入：{user_input}"
+        )
 
         cmd_parts = user_input.split(maxsplit=1)
         if not cmd_parts:
@@ -352,7 +387,7 @@ class ImageGenerationPlugin(Star):
         aspect_ratio = self.config_manager.default_aspect_ratio
         resolution = self.config_manager.default_resolution
 
-        # 检查是否命中预设
+        # 檢查是否命中預設
         matched_preset = None
         extra_content = ""
         if prompt:
@@ -370,10 +405,10 @@ class ImageGenerationPlugin(Star):
                         break
 
         if matched_preset:
-            logger.info(f"[ImageGen] 命中预设: {matched_preset}")
+            logger.info(f"[ImageGen] 命中預設: {matched_preset}")
             preset_content = self.config_manager.presets[matched_preset]
             try:
-                # 预设支持 JSON 格式配置高级参数
+                # 預設支援 JSON 格式配置高階引數
                 if isinstance(
                     preset_content, str
                 ) and preset_content.strip().startswith("{"):
@@ -393,17 +428,17 @@ class ImageGenerationPlugin(Star):
                 prompt = f"{prompt} {extra_content}"
 
         if not prompt:
-            yield event.plain_result("❌ 请提供图片生成的提示词或预设名称！")
+            yield event.plain_result("❌ 請提供提示詞或預設名稱。")
             return
 
         prompt_allowed, prompt_reason = await self.safety_auditor.audit_prompt(
             prompt, event.unified_msg_origin
         )
         if not prompt_allowed:
-            yield event.plain_result(f"❌ 提示词审核未通过: {prompt_reason}")
+            yield event.plain_result(f"❌ 提示詞未通過審核：{prompt_reason}")
             return
 
-        # 获取参考图
+        # 取得參考圖
         images_data = None
         if (
             self.generator
@@ -415,11 +450,11 @@ class ImageGenerationPlugin(Star):
         ):
             images_data = await self.image_processor.fetch_images_from_event(event)
 
-        msg = "已开始生图任务"
+        msg = "已啟動生圖任務"
         if images_data:
-            msg += f"[{len(images_data)}张参考图]"
+            msg += f" [參考圖 {len(images_data)} 張]"
         if matched_preset:
-            msg += f"[预设: {matched_preset}]"
+            msg += f" [預設：{matched_preset}]"
         yield event.plain_result(msg)
 
         task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
@@ -435,31 +470,31 @@ class ImageGenerationPlugin(Star):
             )
         )
 
-    @filter.command("生图模型")
+    @filter.command("img_model", desc="切換生圖模型")
     async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
-        """切换生图模型。"""
+        """切換生圖模型。"""
         if not self.config_manager.adapter_config:
-            yield event.plain_result("❌ 适配器未初始化")
+            yield event.plain_result("❌ 適配器尚未就緒。")
             return
 
         models = self.config_manager.adapter_config.available_models or []
 
         if not model_index:
-            lines = ["📋 可用模型列表:"]
+            lines = ["可用模型列表："]
             current_model_full = f"{self.config_manager.adapter_config.name}/{self.config_manager.adapter_config.model}"
             for idx, model in enumerate(models, 1):
                 marker = " ✓" if model == current_model_full else ""
                 lines.append(f"{idx}. {model}{marker}")
-            lines.append(f"\n当前使用: {current_model_full}")
+            lines.append(f"\n目前模型：{current_model_full}")
             yield event.plain_result("\n".join(lines))
             return
 
         try:
             index = int(model_index) - 1
             if 0 <= index < len(models):
-                raw_model = models[index]  # "供应商名称/模型名称"
+                raw_model = models[index]  # "供應商名稱/模型名稱"
 
-                # 更新配置并重新加载
+                # 更新配置並重新載入
                 self.config_manager.save_model_setting(raw_model)
                 self.config_manager.reload()
 
@@ -468,20 +503,20 @@ class ImageGenerationPlugin(Star):
                         self.config_manager.adapter_config
                     )
 
-                yield event.plain_result(f"✅ 模型已切换: {raw_model}")
+                yield event.plain_result(f"✅ 已切換模型：{raw_model}")
             else:
-                yield event.plain_result("❌ 无效的序号")
+                yield event.plain_result("❌ 模型序號無效。")
         except ValueError:
-            yield event.plain_result("❌ 请输入有效的数字序号")
+            yield event.plain_result("❌ 請輸入有效的數字。")
 
-    @filter.command("预设")
+    @filter.command("preset", desc="管理生圖預設")
     async def preset_command(self, event: AstrMessageEvent):
-        """管理生图预设。"""
+        """管理生圖預設。"""
         user_id = event.unified_msg_origin
         masked_uid = mask_sensitive(user_id)
         message_str = (event.message_str or "").strip()
         logger.info(
-            f"[ImageGen] 收到预设指令 - 用户: {masked_uid}, 内容: {message_str}"
+            f"[ImageGen] 收到 preset 指令 - 使用者：{masked_uid}，內容：{message_str}"
         )
 
         parts = message_str.split(maxsplit=1)
@@ -489,9 +524,9 @@ class ImageGenerationPlugin(Star):
 
         if not cmd_text:
             if not self.config_manager.presets:
-                yield event.plain_result("📋 当前没有预设")
+                yield event.plain_result("目前沒有任何預設。")
                 return
-            preset_list = ["📋 预设列表:"]
+            preset_list = ["預設列表："]
             for idx, (name, prompt) in enumerate(
                 self.config_manager.presets.items(), 1
             ):
@@ -500,17 +535,36 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result("\n".join(preset_list))
             return
 
-        if cmd_text.startswith("添加 "):
-            parts = cmd_text[3:].split(":", 1)
+        action, _, payload = cmd_text.partition(" ")
+        action = action.lower()
+        payload = payload.strip()
+
+        if action == "add":
+            parts = payload.split(":", 1)
             if len(parts) == 2:
                 name, prompt = parts
                 self.config_manager.save_preset(name.strip(), prompt.strip())
-                yield event.plain_result(f"✅ 预设已添加: {name.strip()}")
+                yield event.plain_result(f"✅ 已新增預設：{name.strip()}")
             else:
-                yield event.plain_result("❌ 格式错误: /预设 添加 名称:内容")
-        elif cmd_text.startswith("删除 "):
-            name = cmd_text[3:].strip()
+                yield event.plain_result("❌ 用法：/preset add 名稱:提示詞")
+        elif action in {"del", "delete", "rm"}:
+            name = payload
             if self.config_manager.delete_preset(name):
-                yield event.plain_result(f"✅ 预设已删除: {name}")
+                yield event.plain_result(f"✅ 已刪除預設：{name}")
             else:
-                yield event.plain_result(f"❌ 预设不存在: {name}")
+                yield event.plain_result(f"❌ 找不到預設：{name}")
+        else:
+            yield event.plain_result(
+                "❌ 用法：/preset、/preset add 名稱:提示詞、/preset del 名稱"
+            )
+
+    @filter.on_llm_request()
+    async def enhance_image_tool_prompt(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """在合適的情況下，強化主模型優先使用生圖工具。"""
+        if not self.config_manager.enable_llm_tool or not self.generator:
+            return
+        req.system_prompt = (
+            f"{req.system_prompt or ''}\n\n{self.LLM_TOOL_SYSTEM_PROMPT}\n"
+        )

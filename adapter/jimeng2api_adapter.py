@@ -11,27 +11,27 @@ from ..core.types import GenerationRequest, ImageCapability
 
 
 class Jimeng2APIAdapter(BaseImageAdapter):
-    """Jimeng2API 图像生成适配器。"""
+    """Jimeng2API 圖像生成適配器。"""
 
     def get_capabilities(self) -> ImageCapability:
-        """获取适配器支持的功能。"""
+        """取得適配器支援的功能。"""
         return self._get_configured_capabilities()
 
-    # generate() 方法由基类提供，使用模板方法模式
+    # generate() 方法由基類提供，使用模板方法模式
 
     async def _generate_once(
         self, request: GenerationRequest
     ) -> tuple[list[bytes] | None, str | None]:
-        """执行单次生图请求。"""
+        """執行單次生圖請求。"""
         start_time = time.time()
         session = self._get_session()
         prefix = self._get_log_prefix(request.task_id)
 
         prompt_text = request.prompt
         if prompt_text is None:
-            return None, "缺少提示词"
+            return None, "缺少提示詞"
         if not isinstance(prompt_text, str):
-            logger.warning(f"{prefix} prompt 非字符串类型: {type(prompt_text)}")
+            logger.warning(f"{prefix} prompt 非字串型別: {type(prompt_text)}")
             prompt_text = str(prompt_text)
 
         base_url = self.base_url or "http://localhost:5100"
@@ -41,7 +41,7 @@ class Jimeng2APIAdapter(BaseImageAdapter):
 
         try:
             if request.images:
-                # 图生图：改为 JSON，images 作为 data URL（服务端声明只接受 URL 或本地文件）
+                # 圖生圖：改為 JSON，images 作為 data URL（服務端宣告只接受 URL 或本地檔案）
                 url = f"{base_url.rstrip('/')}/v1/images/compositions"
                 headers["Content-Type"] = "application/json"
 
@@ -57,7 +57,7 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                     "images": images_as_urls,
                 }
                 if request.aspect_ratio:
-                    if request.aspect_ratio == "自动":
+                    if request.aspect_ratio == "自動":
                         payload["intelligent_ratio"] = True
                     else:
                         payload["ratio"] = request.aspect_ratio
@@ -75,26 +75,26 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(
-                            f"{prefix} Compositions 错误 ({resp.status}, 耗时: {duration:.2f}s): {error_text}"
+                            f"{prefix} Compositions 錯誤 ({resp.status}, 耗時: {duration:.2f}s): {error_text}"
                         )
-                        return None, f"API 错误 ({resp.status})"
+                        return None, f"API 錯誤 ({resp.status})"
 
                     data_json = await resp.json()
-                    logger.debug(f"{prefix} Compositions 响应: {data_json}")
-                    logger.info(f"{prefix} Compositions 成功 (耗时: {duration:.2f}s)")
+                    logger.debug(f"{prefix} Compositions 響應: {data_json}")
+                    logger.info(f"{prefix} Compositions 成功 (耗時: {duration:.2f}s)")
                     return await self._extract_images(data_json, request.task_id)
             else:
-                # 文生图
+                # 文生圖
                 url = f"{base_url.rstrip('/')}/v1/images/generations"
                 headers["Content-Type"] = "application/json"
 
                 payload = {
                     "model": self.model or "jimeng-4.5",
                     "prompt": prompt_text,
-                    "response_format": "url",  # 默认使用 url，然后下载
+                    "response_format": "url",  # 預設使用 url，然後下載
                 }
                 if request.aspect_ratio:
-                    if request.aspect_ratio == "自动":
+                    if request.aspect_ratio == "自動":
                         payload["intelligent_ratio"] = True
                     else:
                         payload["ratio"] = request.aspect_ratio
@@ -112,33 +112,33 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(
-                            f"{prefix} Generations 错误 ({resp.status}, 耗时: {duration:.2f}s): {error_text}"
+                            f"{prefix} Generations 錯誤 ({resp.status}, 耗時: {duration:.2f}s): {error_text}"
                         )
-                        return None, f"API 错误 ({resp.status})"
+                        return None, f"API 錯誤 ({resp.status})"
 
                     data_json = await resp.json()
-                    logger.debug(f"{prefix} Generations 响应: {data_json}")
-                    logger.info(f"{prefix} Generations 成功 (耗时: {duration:.2f}s)")
+                    logger.debug(f"{prefix} Generations 響應: {data_json}")
+                    logger.info(f"{prefix} Generations 成功 (耗時: {duration:.2f}s)")
                     return await self._extract_images(data_json, request.task_id)
 
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(f"{prefix} 请求异常 (耗时: {duration:.2f}s): {e}")
+            logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {e}")
             return None, str(e)
 
     async def _extract_images(
         self, response: dict, task_id: str | None = None
     ) -> tuple[list[bytes] | None, str | None]:
-        """从响应中提取图片数据。"""
+        """從響應中提取圖片資料。"""
         prefix = self._get_log_prefix(task_id)
         if response is None:
-            return None, "响应为空"
+            return None, "響應為空"
         if "data" not in response:
-            return None, f"响应中未找到 data 字段: {response}"
+            return None, f"響應中未找到 data 欄位: {response}"
 
         data = response.get("data")
         if data is None:
-            return None, "data 字段为 None"
+            return None, "data 欄位為 None"
 
         images = []
         for item in data:
@@ -152,16 +152,16 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                         images.append(await resp.read())
                     else:
                         logger.error(
-                            f"{prefix} 下载图像失败 ({resp.status}): {item['url']}"
+                            f"{prefix} 下載圖像失敗 ({resp.status}): {item['url']}"
                         )
 
         if not images:
-            return None, "未找到有效的图片数据"
+            return None, "未找到有效的圖片資料"
 
         return images, None
 
     async def receive_token(self) -> dict[str, Any]:
-        """为所有 API Key 自动领取积分。"""
+        """為所有 API Key 自動領取積分。"""
         results = {}
         if not self.api_keys:
             return {"error": "未配置 API Key"}
@@ -185,15 +185,15 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                     results[f"key_{i}"] = {"status": status_code, "data": resp_json}
                     if status_code == 200:
                         logger.info(
-                            f"{self._get_log_prefix()} API Key (索引 {i}) 积分领取成功: {resp_json}"
+                            f"{self._get_log_prefix()} API Key (索引 {i}) 積分領取成功: {resp_json}"
                         )
                     else:
                         logger.warning(
-                            f"{self._get_log_prefix()} API Key (索引 {i}) 积分领取失败 ({status_code}): {resp_json}"
+                            f"{self._get_log_prefix()} API Key (索引 {i}) 積分領取失敗 ({status_code}): {resp_json}"
                         )
             except Exception as e:
                 logger.error(
-                    f"{self._get_log_prefix()} API Key (索引 {i}) 积分领取请求异常: {e}"
+                    f"{self._get_log_prefix()} API Key (索引 {i}) 積分領取請求異常: {e}"
                 )
                 results[f"key_{i}"] = {"error": str(e)}
 

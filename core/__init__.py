@@ -1,6 +1,6 @@
 """
 Core module for image generation plugin
-图像生成插件的核心模块
+圖像生成插件的核心模組
 """
 
 from .base_adapter import BaseImageAdapter
@@ -55,7 +55,7 @@ from .utils import (
 )
 
 __all__ = [
-    # 基类和核心组件
+    # 基類和核心元件
     "BaseImageAdapter",
     "ImageGenerator",
     "TaskManager",
@@ -63,7 +63,7 @@ __all__ = [
     "ConfigManager",
     "UsageManager",
     "ImageProcessor",
-    # 配置数据类
+    # 配置資料類
     "PluginConfig",
     "UsageSettings",
     "CacheSettings",
@@ -75,7 +75,7 @@ __all__ = [
     "ImageGenerationTool",
     "adjust_tool_parameters",
     "SafetyAuditor",
-    # 数据类型
+    # 資料型別
     "AdapterConfig",
     "AdapterMetadata",
     "AdapterType",
@@ -83,7 +83,7 @@ __all__ = [
     "GenerationResult",
     "ImageCapability",
     "ImageData",
-    # 工具函数
+    # 工具函式
     "convert_image_format",
     "convert_images_batch",
     "detect_mime_type",

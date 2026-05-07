@@ -25,13 +25,13 @@ SUPPORTED_IMAGE_FORMATS = {
     "image/heif",
 }
 
-# 使用 constants.py 中的定义，转换为 set 以保持向后兼容
+# 使用 constants.py 中的定義，轉換為 set 以保持向後相容
 ALLOWED_ASPECT_RATIOS = set(SUPPORTED_ASPECT_RATIOS)
 ALLOWED_RESOLUTIONS = set(SUPPORTED_RESOLUTIONS)
 
 
 def detect_mime_type(data: bytes) -> str:
-    """根据魔数（Magic Numbers）尽力检测 MIME 类型。"""
+    """根據魔數（Magic Numbers）盡力檢測 MIME 型別。"""
 
     if data.startswith(b"\xff\xd8"):
         return "image/jpeg"
@@ -51,7 +51,7 @@ def detect_mime_type(data: bytes) -> str:
 
 
 def _sync_convert_image_format(image_data: bytes, mime_type: str) -> ImageData:
-    """同步将不支持的图像转换为 JPEG。"""
+    """同步將不支援的圖像轉換為 JPEG。"""
 
     try:
         img = Image.open(BytesIO(image_data))
@@ -67,32 +67,32 @@ def _sync_convert_image_format(image_data: bytes, mime_type: str) -> ImageData:
 
         output = BytesIO()
         img.save(output, format="JPEG", quality=95)
-        logger.debug("[ImageGen] 已将图像转换为 JPEG")
+        logger.debug("[ImageGen] 已將圖像轉換為 JPEG")
         return ImageData(data=output.getvalue(), mime_type="image/jpeg")
     except Exception as exc:  # noqa: BLE001
-        logger.error(f"[ImageGen] 图像转换失败: {exc}")
+        logger.error(f"[ImageGen] 圖像轉換失敗: {exc}")
         return ImageData(data=image_data, mime_type=mime_type)
 
 
 async def convert_image_format(image_data: bytes, mime_type: str) -> ImageData:
-    """如果 MIME 类型不支持，则转换图像。"""
+    """如果 MIME 型別不支援，則轉換圖像。"""
 
     real_mime = detect_mime_type(image_data)
     if real_mime in SUPPORTED_IMAGE_FORMATS:
         return ImageData(data=image_data, mime_type=real_mime)
-    logger.info(f"[ImageGen] 正在转换图像格式: {mime_type} -> image/jpeg")
+    logger.info(f"[ImageGen] 正在轉換圖像格式: {mime_type} -> image/jpeg")
     return await asyncio.to_thread(_sync_convert_image_format, image_data, mime_type)
 
 
 async def convert_images_batch(images: Iterable[ImageData]) -> list[ImageData]:
-    """并行批量转换图像。"""
+    """並行批次轉換圖像。"""
 
     tasks = [convert_image_format(img.data, img.mime_type) for img in images]
     return await asyncio.gather(*tasks)
 
 
 def validate_aspect_ratio(value: str | None) -> str | None:
-    """验证宽高比是否在允许的集合中。"""
+    """驗證寬高比是否在允許的集合中。"""
 
     if value is None:
         return None
@@ -100,7 +100,7 @@ def validate_aspect_ratio(value: str | None) -> str | None:
 
 
 def validate_resolution(value: str | None) -> str | None:
-    """验证分辨率是否在允许的集合中。"""
+    """驗證解析度是否在允許的集合中。"""
 
     if value is None:
         return None
@@ -113,16 +113,16 @@ def mask_sensitive(
     min_length: int = MASK_MIN_LENGTH,
     placeholder: str = MASK_PLACEHOLDER,
 ) -> str:
-    """对敏感信息进行脱敏处理。
+    """對敏感資訊進行脫敏處理。
 
     Args:
-        value: 需要脱敏的字符串
-        visible_chars: 两端显示的字符数
-        min_length: 需要脱敏的最小长度
-        placeholder: 中间的占位符
+        value: 需要脫敏的字串
+        visible_chars: 兩端顯示的字元數
+        min_length: 需要脫敏的最小長度
+        placeholder: 中間的佔位符
 
     Returns:
-        脱敏后的字符串
+        脫敏後的字串
     """
     if len(value) <= min_length:
         return placeholder

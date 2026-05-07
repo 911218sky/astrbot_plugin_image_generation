@@ -13,7 +13,7 @@ from .utils import mask_sensitive
 
 
 class BaseImageAdapter(abc.ABC):
-    """图像生成适配器基类。"""
+    """圖像生成適配器基類。"""
 
     def __init__(self, config: AdapterConfig):
         self.config = config
@@ -24,16 +24,16 @@ class BaseImageAdapter(abc.ABC):
         self.proxy = config.proxy
         self.timeout = config.timeout
         self.download_timeout = DEFAULT_DOWNLOAD_TIMEOUT
-        self.max_retry_attempts = max(1, config.max_retry_attempts)
+        self.max_retry_attempts = min(5, max(1, config.max_retry_attempts))
         self.safety_settings = config.safety_settings
         self._session: aiohttp.ClientSession | None = None
 
     @abc.abstractmethod
     def get_capabilities(self) -> ImageCapability:
-        """获取适配器支持的功能。"""
+        """取得適配器支援的功能。"""
 
     def _get_configured_capabilities(self) -> ImageCapability:
-        """根据配置项构建适配器能力。"""
+        """根據配置項構建適配器能力。"""
         capability_map: dict[str, ImageCapability] = {
             "text_to_image": ImageCapability.TEXT_TO_IMAGE,
             "image_to_image": ImageCapability.IMAGE_TO_IMAGE,
@@ -48,30 +48,30 @@ class BaseImageAdapter(abc.ABC):
         return result
 
     async def close(self) -> None:
-        """关闭底层的 HTTP 会话。"""
+        """關閉底層的 HTTP 會話。"""
 
         if self._session and not self._session.closed:
             await self._session.close()
         self._session = None
 
     def _get_session(self) -> aiohttp.ClientSession:
-        """获取或创建 HTTP 会话。"""
+        """取得或建立 HTTP 會話。"""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
 
     def _get_current_api_key(self) -> str:
-        """获取当前使用的 API Key。"""
+        """取得當前使用的 API Key。"""
         if not self.api_keys:
             return ""
         return self.api_keys[self.current_key_index % len(self.api_keys)]
 
     def _get_masked_api_key(self) -> str:
-        """获取脱敏后的当前 API Key，用于日志输出。"""
+        """取得脫敏後的當前 API Key，用於日誌輸出。"""
         return mask_sensitive(self._get_current_api_key())
 
     def _get_log_prefix(self, task_id: str | None = None) -> str:
-        """获取统一的日志前缀。"""
+        """取得統一的日誌字首。"""
         adapter_name = self.__class__.__name__.replace("Adapter", "")
         prefix = f"[ImageGen] [{adapter_name}]"
         if task_id:
@@ -79,19 +79,19 @@ class BaseImageAdapter(abc.ABC):
         return prefix
 
     def _get_timeout(self) -> aiohttp.ClientTimeout:
-        """获取统一的请求超时配置。"""
+        """取得統一的請求超時配置。"""
         return aiohttp.ClientTimeout(total=self.timeout)
 
     def _get_download_timeout(self) -> aiohttp.ClientTimeout:
-        """获取统一的下载超时配置。"""
+        """取得統一的下載超時配置。"""
         return aiohttp.ClientTimeout(total=self.download_timeout)
 
     def _rotate_api_key(self) -> None:
-        """轮换 API Key。"""
+        """輪換 API Key。"""
         if len(self.api_keys) > 1:
             self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
             logger.info(
-                f"{self._get_log_prefix()} 轮换 API Key -> 索引 {self.current_key_index}"
+                f"{self._get_log_prefix()} 輪換 API Key -> 索引 {self.current_key_index}"
             )
 
     def update_model(self, model: str) -> None:
@@ -99,46 +99,59 @@ class BaseImageAdapter(abc.ABC):
         self.model = model
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
-        """带重试逻辑的图像生成模板方法。
+        """帶重試邏輯的圖像生成模板方法。
 
-        子类应重写 `_generate_once()` 方法来实现具体的生成逻辑。
-        如需在生成前进行预处理验证，可重写 `_pre_generate()` 方法。
+        子類應重寫 `_generate_once()` 方法來實現具體的生成邏輯。
+        如需在生成前進行預處理驗證，可重寫 `_pre_generate()` 方法。
         """
         if not self.api_keys:
             return GenerationResult(images=None, error="未配置 API Key")
 
-        # 预处理检查（子类可重写）
+        # 預處理檢查（子類可重寫）
         pre_result = self._pre_generate(request)
         if pre_result is not None:
             return pre_result
 
+        prefix = self._get_log_prefix(request.task_id)
         last_error = "未配置 API Key"
-        for attempt in range(self.max_retry_attempts):
-            if attempt:
-                logger.info(
-                    f"{self._get_log_prefix(request.task_id)} 重试 ({attempt + 1}/{self.max_retry_attempts})"
-                )
-
+        for attempt in range(1, self.max_retry_attempts + 1):
             images, err = await self._generate_once(request)
             if images is not None:
+                if attempt > 1:
+                    logger.info(
+                        f"{prefix} Generation succeeded on attempt "
+                        f"{attempt}/{self.max_retry_attempts}"
+                    )
                 return GenerationResult(images=images, error=None)
 
-            last_error = err or "生成失败"
-            if attempt < self.max_retry_attempts - 1:
+            last_error = err or "生成失敗"
+            logger.warning(
+                f"{prefix} Attempt {attempt}/{self.max_retry_attempts} failed: "
+                f"{last_error}"
+            )
+            if attempt < self.max_retry_attempts:
                 self._rotate_api_key()
-                # 轮换 Key 时进行指数退避
-                if (attempt + 1) % max(1, len(self.api_keys)) == 0:
-                    await asyncio.sleep(
-                        min(2 ** ((attempt + 1) // len(self.api_keys)), 10)
+                logger.info(
+                    f"{prefix} Retry {attempt + 1}/{self.max_retry_attempts} scheduled"
+                )
+                # 輪換 Key 時進行指數退避
+                if attempt % max(1, len(self.api_keys)) == 0:
+                    backoff_seconds = min(2 ** (attempt // len(self.api_keys)), 10)
+                    logger.info(
+                        f"{prefix} Backing off for {backoff_seconds}s before retry"
                     )
+                    await asyncio.sleep(backoff_seconds)
 
-        return GenerationResult(images=None, error=f"重试失败: {last_error}")
+        logger.error(
+            f"{prefix} All {self.max_retry_attempts} attempts failed: {last_error}"
+        )
+        return GenerationResult(images=None, error=last_error)
 
     def _pre_generate(self, request: GenerationRequest) -> GenerationResult | None:
-        """生成前的预处理检查。
+        """生成前的預處理檢查。
 
-        子类可重写此方法进行参数验证。
-        返回 None 表示通过检查，返回 GenerationResult 表示提前返回错误。
+        子類可重寫此方法進行引數驗證。
+        返回 None 表示透過檢查，返回 GenerationResult 表示提前返回錯誤。
         """
         return None
 
@@ -146,8 +159,8 @@ class BaseImageAdapter(abc.ABC):
     async def _generate_once(
         self, request: GenerationRequest
     ) -> tuple[list[bytes] | None, str | None]:
-        """执行单次生成请求。
+        """執行單次生成請求。
 
-        子类必须实现此方法。
-        返回 (images, error) 元组，成功时 images 非空，失败时 error 非空。
+        子類必須實現此方法。
+        返回 (images, error) 元組，成功時 images 非空，失敗時 error 非空。
         """
