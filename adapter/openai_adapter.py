@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import json
 import time
 from typing import Any
 
@@ -71,13 +73,59 @@ class OpenAIAdapter(BaseImageAdapter):
                         f"{prefix} API 錯誤 ({resp.status}, 耗時: {duration:.2f}s): {error_text}"
                     )
                     return None, f"API 錯誤 ({resp.status})"
-                data = await resp.json()
+                data, error = await self._read_json_response(
+                    resp, prefix=prefix, duration=duration
+                )
+                if error:
+                    return None, error
                 logger.info(f"{prefix} 生成成功 (耗時: {duration:.2f}s)")
                 return await self._extract_images(data)
+        except asyncio.TimeoutError:
+            duration = time.time() - start_time
+            logger.error(f"{prefix} 請求逾時 (耗時: {duration:.2f}s)")
+            return None, "請求逾時，請稍後重試"
+        except aiohttp.ClientError as e:
+            duration = time.time() - start_time
+            error_message = str(e).strip() or e.__class__.__name__
+            logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {error_message}")
+            return None, error_message
         except Exception as e:
             duration = time.time() - start_time
-            logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {e}")
-            return None, str(e)
+            error_message = str(e).strip() or e.__class__.__name__
+            logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {error_message}")
+            return None, error_message
+
+    async def _read_json_response(
+        self,
+        resp: aiohttp.ClientResponse,
+        *,
+        prefix: str,
+        duration: float,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """Read JSON response with tolerant handling for non-standard content types."""
+        try:
+            return await resp.json(content_type=None), None
+        except (aiohttp.ContentTypeError, json.JSONDecodeError):
+            raw_text = await resp.text()
+            if not raw_text.strip():
+                logger.error(
+                    f"{prefix} API 回應為空 (耗時: {duration:.2f}s, Content-Type: {resp.headers.get('Content-Type', 'unknown')})"
+                )
+                return None, "API 回應為空"
+
+            try:
+                data = json.loads(raw_text)
+            except json.JSONDecodeError:
+                preview = raw_text[:300].replace("\n", "\\n")
+                logger.error(
+                    f"{prefix} API 回應不是有效 JSON (耗時: {duration:.2f}s, Content-Type: {resp.headers.get('Content-Type', 'unknown')}): {preview}"
+                )
+                return None, "API 回應格式錯誤，無法解析生成結果"
+            else:
+                logger.warning(
+                    f"{prefix} API 使用非標準 Content-Type 回應 JSON: {resp.headers.get('Content-Type', 'unknown')}"
+                )
+                return data, None
 
     def _build_payload(self, request: GenerationRequest) -> dict:
         """構建請求載荷。"""

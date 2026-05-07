@@ -201,6 +201,7 @@ class ImageGenerationPlugin(Star):
         self, unified_msg_origin: str, reason: str
     ) -> None:
         """通知使用者生圖失敗。"""
+        reason = (reason or "").strip() or "生圖服務暫時失敗，請稍後再試"
         await self.context.send_message(
             unified_msg_origin,
             MessageChain().message(f"❌ 生成失敗：{reason}"),
