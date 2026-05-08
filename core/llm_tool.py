@@ -28,6 +28,40 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
+def _normalize_avatar_references(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    refs: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        ref = item.strip().lower()
+        if not ref or ref in seen:
+            continue
+        refs.append(ref)
+        seen.add(ref)
+    return refs
+
+
+def _dedupe_images_data(
+    images_data: list[tuple[bytes, str]],
+) -> list[tuple[bytes, str]]:
+    deduped: list[tuple[bytes, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    for data, mime in images_data:
+        digest = hashlib.sha256(data).hexdigest()
+        key = (digest, mime)
+        if key in seen:
+            continue
+        deduped.append((data, mime))
+        seen.add(key)
+
+    return deduped
+
+
 def _resolve_aspect_ratio(
     prompt: str, requested: str | None, fallback: str | None
 ) -> str | None:
@@ -327,17 +361,13 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                 )
 
                 # 處理頭像引用引數
-                avatar_refs = kwargs.get("avatar_references", [])
-                if use_self_avatar:
-                    if isinstance(avatar_refs, list):
-                        avatar_refs = [*avatar_refs, "self"]
-                    else:
-                        avatar_refs = ["self"]
-                if avatar_refs and isinstance(avatar_refs, list):
+                avatar_refs = _normalize_avatar_references(
+                    kwargs.get("avatar_references", [])
+                )
+                if use_self_avatar and "self" not in avatar_refs:
+                    avatar_refs.append("self")
+                if avatar_refs:
                     for ref in avatar_refs:
-                        if not isinstance(ref, str):
-                            continue
-                        ref = ref.strip().lower()
                         user_id = None
                         if ref == "self":
                             user_id = str(event.get_self_id())
@@ -359,6 +389,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                                 logger.info(
                                     f"[ImageGen] 已新增 {user_id} 的頭像作為參考圖"
                                 )
+                images_data = _dedupe_images_data(images_data)
         except Exception as e:
             logger.error(f"[ImageGen] 處理參考圖失敗: {e}", exc_info=True)
             # 參考圖處理失敗不影響文生圖流程，記錄日誌繼續執行
