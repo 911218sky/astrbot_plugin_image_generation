@@ -18,6 +18,7 @@ from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
 from .types import ImageCapability
+from .utils import extract_self_avatar_alias
 
 if TYPE_CHECKING:
     pass
@@ -209,7 +210,8 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
     description: str = (
         "生成或編輯圖片。當使用者希望實際產出圖片時就應使用這個工具，"
         "包括繪圖、重繪、風格轉換、製作頭像、貼圖、迷因、海報、縮圖、"
-        "人像、表情圖或各種圖片變體。"
+        "人像、表情圖或各種圖片變體。若當前訊息含有圖片、引用圖片或 @ 使用者，"
+        "工具會自動把這些內容作為參考圖。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -217,7 +219,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
             "properties": {
                 "prompt": {
                     "type": "string",
-                    "description": "請填入最終的生圖提示詞，忠實保留使用者的視覺意圖；如果細節不足，可根據上下文合理補全。",
+                    "description": "請填入最終的生圖提示詞，忠實保留使用者的視覺意圖；如果使用者附圖或引用圖片並要求生成、重繪、仿作、改風格或做類似圖片，應直接呼叫工具，參考圖會由工具自動帶入。",
                 },
                 "aspect_ratio": {
                     "type": "string",
@@ -245,7 +247,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "avatar_references": {
                     "type": "array",
-                    "description": "可選的頭像參考來源，用於圖生圖或角色對齊。可填入 `self` 代表機器人頭像、`sender` 代表當前使用者，或直接填使用者 ID。",
+                    "description": "可選的頭像參考來源，用於圖生圖或角色對齊。可填入 `self` 代表機器人頭像、`sender` 代表當前使用者，或直接填使用者 ID。當使用者寫 @self，或需求明確需要機器人自身形象時，填入 `self`。",
                     "items": {"type": "string"},
                 },
             },
@@ -265,6 +267,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         prompt = kwargs.get("prompt", "").strip()
         if not prompt:
             return "❌ 請提供圖片生成的提示詞"
+        prompt, use_self_avatar = extract_self_avatar_alias(prompt)
 
         plugin = self.plugin
         if not plugin:
@@ -325,6 +328,11 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
 
                 # 處理頭像引用引數
                 avatar_refs = kwargs.get("avatar_references", [])
+                if use_self_avatar:
+                    if isinstance(avatar_refs, list):
+                        avatar_refs = [*avatar_refs, "self"]
+                    else:
+                        avatar_refs = ["self"]
                 if avatar_refs and isinstance(avatar_refs, list):
                     for ref in avatar_refs:
                         if not isinstance(ref, str):
