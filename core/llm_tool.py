@@ -387,7 +387,8 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         )
 
         mode = "圖生圖" if images_data else "文生圖"
-        notice = f"✅ 已啟動{mode}任務（任務 ID：{task_id}）"
+        ref_info = f" [參考圖 {len(images_data)} 張]" if images_data else ""
+        notice = f"✅ 已啟動{mode}任務{ref_info}（任務 ID：{task_id}）"
         await plugin.context.send_message(
             event.unified_msg_origin,
             MessageChain().message(notice),
