@@ -1,5 +1,10 @@
 # 更新日誌
 
+## v1.0.6 - 2026-06-07
+
+- 參考 LivingMemory 的指令組寫法，將生圖、任務、模型與預設管理統一整理到 `/img` 指令組。
+- 新增 `/img gen`、`/img tasks`、`/img model`、`/img preset`、`/img help`，避免管理指令分散在 `/img_model`、`/img_tasks`、`/preset`。
+
 ## v1.0.5 - 2026-05-08
 
 - LLM Tool 啟動圖生圖任務時，通知訊息現在會顯示參考圖數量。

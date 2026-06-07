@@ -40,7 +40,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "gemini-3-pro-image-preview",
@@ -97,7 +97,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "gemini-3-pro-image",
@@ -151,7 +151,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "gpt-image-2",
@@ -208,7 +208,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "z-image-turbo"
@@ -262,7 +262,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "jimeng-4.5",
@@ -318,7 +318,7 @@
           },
           "available_models": {
             "description": "可用模型列表",
-            "hint": "用於 /img_model 命令切換時的可選模型。",
+            "hint": "用於 /img model 命令切換時的可選模型。",
             "type": "list",
             "default": [
               "grok-imagine-image-pro",
@@ -353,7 +353,7 @@
     "items": {
       "model": {
         "description": "生圖模型",
-        "hint": "可以透過 /img_model 命令切換,格式為 '適配器名稱/模型名稱',留空自動使用第一個可用模型",
+        "hint": "可以透過 /img model 命令切換,格式為 '適配器名稱/模型名稱',留空自動使用第一個可用模型",
         "type": "string",
         "default": ""
       },

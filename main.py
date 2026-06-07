@@ -17,6 +17,7 @@ from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.star.filter.custom_filter import CustomFilter
 from astrbot.core.star.star_tools import StarTools
 
 from .core.config_manager import ConfigManager
@@ -33,6 +34,37 @@ from .core.utils import (
     validate_aspect_ratio,
     validate_resolution,
 )
+
+
+class LegacyImageCommandFilter(CustomFilter):
+    """Only match legacy commands when the original message used a wake prefix."""
+
+    LEGACY_COMMANDS = {"img_model", "img_tasks", "preset"}
+
+    def filter(self, event: AstrMessageEvent, cfg: AstrBotConfig) -> bool:
+        raw_message = (
+            getattr(getattr(event, "message_obj", None), "message_str", "") or ""
+        ).strip()
+        if not raw_message:
+            raw_message = (event.get_message_str() or "").strip()
+
+        wake_prefixes = []
+        try:
+            wake_prefixes = cfg.get("wake_prefix", []) or []
+        except AttributeError:
+            wake_prefixes = []
+
+        for prefix in sorted(
+            (prefix for prefix in wake_prefixes if isinstance(prefix, str) and prefix),
+            key=len,
+            reverse=True,
+        ):
+            if raw_message.startswith(prefix):
+                command_text = raw_message[len(prefix) :].strip()
+                command = command_text.split(maxsplit=1)[0] if command_text else ""
+                return command in self.LEGACY_COMMANDS
+
+        return False
 
 
 class ImageGenerationPlugin(Star):
@@ -415,7 +447,53 @@ class ImageGenerationPlugin(Star):
 
     # ---------------------- 指令處理 ----------------------
 
-    @filter.command("img", desc="生成圖片")
+    @filter.command_group("img")
+    def img(self):
+        """圖像生成指令組。"""
+        pass
+
+    @staticmethod
+    def _get_img_subcommand_payload(event: AstrMessageEvent) -> str:
+        """取得 /img <subcommand> 後面的完整文字。"""
+        parts = (event.message_str or "").strip().split(maxsplit=2)
+        return parts[2].strip() if len(parts) > 2 else ""
+
+    @staticmethod
+    def _get_legacy_command_redirect(event: AstrMessageEvent) -> str | None:
+        """將舊版分散指令轉成新的 /img 指令組用法。"""
+        message = (event.message_str or "").strip()
+        if message.startswith("/"):
+            message = message[1:].strip()
+
+        command, _, payload = message.partition(" ")
+        redirects = {
+            "img_model": "img model",
+            "img_tasks": "img tasks",
+            "preset": "img preset",
+        }
+        new_command = redirects.get(command)
+        if not new_command:
+            return None
+
+        suggestion = f"/{new_command}"
+        payload = payload.strip()
+        if payload:
+            suggestion = f"{suggestion} {payload}"
+        return suggestion
+
+    @filter.custom_filter(LegacyImageCommandFilter)
+    @filter.regex(r"^/?(?:img_model|img_tasks|preset)(?:\s|$)")
+    async def legacy_image_command_redirect(self, event: AstrMessageEvent):
+        """提示舊版分散指令改用 /img 指令組。"""
+        suggestion = self._get_legacy_command_redirect(event)
+        if not suggestion:
+            return
+
+        yield event.plain_result(
+            f"此指令已整理到 /img 指令組，請改用：{suggestion}"
+        ).stop_event()
+
+    @img.command("gen", alias={"generate", "create", "draw"}, desc="生成圖片")
     async def generate_image_command(self, event: AstrMessageEvent):
         """處理生圖指令。"""
         user_id = event.unified_msg_origin
@@ -429,16 +507,11 @@ class ImageGenerationPlugin(Star):
 
         masked_uid = mask_sensitive(user_id)
 
-        user_input = (event.message_str or "").strip()
+        prompt = self._get_img_subcommand_payload(event)
         logger.info(
-            f"[ImageGen] 收到 img 指令 - 使用者：{masked_uid}，輸入：{user_input}"
+            f"[ImageGen] 收到 img gen 指令 - 使用者：{masked_uid}，提示詞：{prompt}"
         )
 
-        cmd_parts = user_input.split(maxsplit=1)
-        if not cmd_parts:
-            return
-
-        prompt = cmd_parts[1].strip() if len(cmd_parts) > 1 else ""
         aspect_ratio = self.config_manager.default_aspect_ratio
         resolution = self.config_manager.default_resolution
 
@@ -537,7 +610,7 @@ class ImageGenerationPlugin(Star):
             )
         )
 
-    @filter.command("img_tasks", desc="查看進行中的生圖任務")
+    @img.command("tasks", desc="查看進行中的生圖任務")
     async def image_tasks_command(self, event: AstrMessageEvent):
         """查看目前進行中的生圖任務。"""
         if not self._active_generation_tasks:
@@ -564,7 +637,7 @@ class ImageGenerationPlugin(Star):
 
         yield event.plain_result("\n".join(lines))
 
-    @filter.command("img_model", desc="切換生圖模型")
+    @img.command("model", desc="切換生圖模型")
     async def model_command(self, event: AstrMessageEvent, model_index: str = ""):
         """切換生圖模型。"""
         if not self.config_manager.adapter_config:
@@ -603,7 +676,7 @@ class ImageGenerationPlugin(Star):
         except ValueError:
             yield event.plain_result("❌ 請輸入有效的數字。")
 
-    @filter.command("preset", desc="管理生圖預設")
+    @img.command("preset", desc="管理生圖預設")
     async def preset_command(self, event: AstrMessageEvent):
         """管理生圖預設。"""
         user_id = event.unified_msg_origin
@@ -613,8 +686,7 @@ class ImageGenerationPlugin(Star):
             f"[ImageGen] 收到 preset 指令 - 使用者：{masked_uid}，內容：{message_str}"
         )
 
-        parts = message_str.split(maxsplit=1)
-        cmd_text = parts[1].strip() if len(parts) > 1 else ""
+        cmd_text = self._get_img_subcommand_payload(event)
 
         if not cmd_text:
             if not self.config_manager.presets:
@@ -640,7 +712,7 @@ class ImageGenerationPlugin(Star):
                 self.config_manager.save_preset(name.strip(), prompt.strip())
                 yield event.plain_result(f"✅ 已新增預設：{name.strip()}")
             else:
-                yield event.plain_result("❌ 用法：/preset add 名稱:提示詞")
+                yield event.plain_result("❌ 用法：/img preset add 名稱:提示詞")
         elif action in {"del", "delete", "rm"}:
             name = payload
             if self.config_manager.delete_preset(name):
@@ -649,8 +721,25 @@ class ImageGenerationPlugin(Star):
                 yield event.plain_result(f"❌ 找不到預設：{name}")
         else:
             yield event.plain_result(
-                "❌ 用法：/preset、/preset add 名稱:提示詞、/preset del 名稱"
+                "❌ 用法：/img preset、/img preset add 名稱:提示詞、/img preset del 名稱"
             )
+
+    @img.command("help", desc="顯示生圖指令說明")
+    async def image_help_command(self, event: AstrMessageEvent):
+        """顯示生圖指令說明。"""
+        yield event.plain_result(
+            "\n".join(
+                [
+                    "img 指令組：",
+                    "/img gen <提示詞或預設名稱> [額外提示詞] - 生成圖片",
+                    "/img tasks - 查看進行中的生圖任務",
+                    "/img model [序號] - 顯示或切換生圖模型",
+                    "/img preset - 顯示所有預設",
+                    "/img preset add 名稱:提示詞 - 新增預設",
+                    "/img preset del 名稱 - 刪除預設",
+                ]
+            )
+        )
 
     @filter.on_llm_request()
     async def enhance_image_tool_prompt(
