@@ -1,3 +1,5 @@
-aiohttp>=3.9.0
-Pillow>=10.0.0
-pydantic>=2.0.0
+# 上限避免未來大版本破壞 API；升級前請先在 AstrBot 環境測試。
+aiohttp>=3.9.0,<4
+Pillow>=10.0.0,<13
+pydantic>=2.0.0,<3
+quart>=0.20.0,<1

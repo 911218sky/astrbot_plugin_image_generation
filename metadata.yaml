@@ -1,7 +1,7 @@
 name: astrbot_plugin_image_generation_911218sky
 display_name: 通用生圖 Sky
 desc: 通用圖像生成插件，支援多種圖像生成模型與多樣化生成方式
-version: v1.0.6
+version: v1.0.8
 author: 911218sky
 repo: https://github.com/911218sky/astrbot_plugin_image_generation
 astrbot_version: ">=4.10.4"

@@ -1,5 +1,19 @@
 # 更新日誌
 
+## v1.0.8 - 2026-06-07
+
+- 照片快取頁新增原圖放大預覽與下載功能。
+- 生成圖片現在會寫入插件自己的 `image_metadata.json`，記錄檔名、任務 ID、模型、提示詞、會話與生成狀態。
+- 快取圖片卡片與預覽視窗會顯示生成模型、提示詞摘要與任務資訊；舊圖片沒有 metadata 時會標示為未記錄。
+- 新增 `core/image_metadata_store.py`，把圖片 metadata 儲存邏輯從主流程與 Page API 中拆出，方便維護。
+
+## v1.0.7 - 2026-06-07
+
+- 新增 AstrBot 官方插件 Pages 看板，可查看排隊中、生成中、最近完成/失敗紀錄與照片快取。
+- 生圖任務現在會區分 `queued`、`running`、`success`、`failed`、`blocked`，方便 Web 頁面與 `/img tasks` 觀察。
+- 新增 `core/page_api.py`，以插件執行期快照提供看板資料，不寫入 AstrBot 核心資料庫。
+- `requirements.txt` 加上依賴上限，降低未來大版本依賴破壞風險。
+
 ## v1.0.6 - 2026-06-07
 
 - 參考 LivingMemory 的指令組寫法，將生圖、任務、模型與預設管理統一整理到 `/img` 指令組。

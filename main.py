@@ -22,6 +22,7 @@ from astrbot.core.star.star_tools import StarTools
 
 from .core.config_manager import ConfigManager
 from .core.generator import ImageGenerator
+from .core.image_metadata_store import ImageMetadataStore
 from .core.image_processor import ImageProcessor
 from .core.llm_tool import ImageGenerationTool, adjust_tool_parameters
 from .core.safety_auditor import SafetyAuditor
@@ -118,6 +119,12 @@ class ImageGenerationPlugin(Star):
             self.config_manager.usage_settings.max_image_size_mb,
             self.config_manager.cache_settings.max_cache_count,
         )
+        self.image_metadata_store = ImageMetadataStore(
+            self.data_dir / "image_metadata.json",
+            max_records=max(
+                self.config_manager.cache_settings.max_cache_count * 2, 100
+            ),
+        )
 
         # 初始化工作管理員
         self.task_manager = TaskManager()
@@ -129,6 +136,10 @@ class ImageGenerationPlugin(Star):
         self.generator: ImageGenerator | None = None
         self.semaphore: asyncio.Semaphore | None = None
         self._active_generation_tasks: dict[str, dict[str, Any]] = {}
+        self._recent_generation_tasks: list[dict[str, Any]] = []
+        self.page_api = None
+
+        self._register_official_page_api_if_available()
 
     # ---------------------- 生命週期 ----------------------
 
@@ -232,6 +243,111 @@ class ImageGenerationPlugin(Star):
         """建立後臺任務並新增到管理器中。"""
         return self.task_manager.create_task(coro)
 
+    def _register_official_page_api_if_available(self) -> None:
+        """註冊 AstrBot 官方插件頁 API；舊版 AstrBot 不支援時自動跳過。"""
+        if not hasattr(self.context, "register_web_api"):
+            return
+
+        try:
+            from .core.page_api import PluginPageApi
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ImageGen] 官方插件頁 API 不可用，已跳過註冊: {exc}")
+            return
+
+        try:
+            self.page_api = PluginPageApi(self)
+            self.page_api.register_routes()
+            logger.info("[ImageGen] 官方插件頁 API 已註冊")
+        except Exception as exc:  # noqa: BLE001
+            self.page_api = None
+            logger.warning(
+                f"[ImageGen] 官方插件頁 API 註冊失敗，已跳過: {exc}",
+                exc_info=True,
+            )
+
+    def _get_generation_task_snapshot(self, task_id: str) -> dict[str, Any]:
+        """取得單一任務的可展示快照。"""
+        info = dict(self._active_generation_tasks.get(task_id, {}))
+        info.setdefault("task_id", task_id)
+        return {key: value for key, value in info.items() if not key.startswith("_")}
+
+    def _mark_generation_task_running(self, task_id: str) -> None:
+        """標記生圖任務已取得併發槽並開始實際生成。"""
+        info = self._active_generation_tasks.get(task_id)
+        if not info:
+            return
+        now = time.time()
+        info["status"] = "running"
+        info["running_at"] = now
+
+    def _remember_generation_task(
+        self, task_id: str, status: str, **extra: Any
+    ) -> None:
+        """保留最近完成任務，供插件頁查看。"""
+        info = self._active_generation_tasks.get(task_id)
+        if info is not None:
+            if info.get("_recorded"):
+                return
+            info["_recorded"] = True
+
+        record = self._get_generation_task_snapshot(task_id)
+        record.update(extra)
+        record["task_id"] = task_id
+        record["status"] = status
+        record["finished_at"] = time.time()
+        started_at = record.get("started_at")
+        if started_at and "duration" not in record:
+            try:
+                record["duration"] = max(0.0, record["finished_at"] - float(started_at))
+            except (TypeError, ValueError):
+                record["duration"] = 0.0
+        self._recent_generation_tasks.insert(0, record)
+        del self._recent_generation_tasks[50:]
+
+    @staticmethod
+    def _file_names(paths: list[str]) -> list[str]:
+        """把完整檔案路徑轉成頁面可讀的檔名。"""
+        return [str(path).replace("\\", "/").rsplit("/", 1)[-1] for path in paths]
+
+    def _current_model_info(self) -> dict[str, str]:
+        """取得目前使用中的模型資訊。"""
+        adapter = self.config_manager.adapter_config
+        if not adapter:
+            return {"provider": "", "model": "", "model_full": ""}
+        return {
+            "provider": adapter.name,
+            "model": adapter.model,
+            "model_full": f"{adapter.name}/{adapter.model}",
+        }
+
+    def _remember_generated_image_metadata(
+        self,
+        generated_file_paths: list[str],
+        *,
+        task_id: str,
+        status: str,
+        prompt: str,
+        unified_msg_origin: str,
+        images: list[ImageData],
+        aspect_ratio: str | None,
+        resolution: str | None,
+    ) -> None:
+        """記錄生成圖片與任務的對應關係，供官方插件頁展示。"""
+        model_info = self._current_model_info()
+        self.image_metadata_store.remember_files(
+            generated_file_paths,
+            task_id=task_id,
+            status=status,
+            prompt=prompt,
+            model_full=model_info["model_full"],
+            provider=model_info["provider"],
+            model=model_info["model"],
+            user=unified_msg_origin,
+            mode="圖生圖" if images else "文生圖",
+            aspect_ratio=aspect_ratio or "自動",
+            resolution=resolution or "1K",
+        )
+
     async def _notify_generation_failure(
         self, unified_msg_origin: str, reason: str
     ) -> None:
@@ -302,12 +418,15 @@ class ImageGenerationPlugin(Star):
 
         mode = "圖生圖" if images_data else "文生圖"
         self._active_generation_tasks[task_id] = {
+            "task_id": task_id,
+            "status": "queued",
             "mode": mode,
-            "prompt_preview": prompt[:40] + ("..." if len(prompt) > 40 else ""),
+            "prompt_preview": prompt[:120] + ("..." if len(prompt) > 120 else ""),
             "started_at": time.time(),
             "user": unified_msg_origin,
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
+            "reference_count": len(images_data or []),
         }
 
         final_ar = validate_aspect_ratio(aspect_ratio) or None
@@ -323,12 +442,14 @@ class ImageGenerationPlugin(Star):
         # 使用訊號量控制併發
         try:
             if self.semaphore is None:
+                self._mark_generation_task_running(task_id)
                 await self._do_generate_and_send(
                     prompt, unified_msg_origin, images, final_ar, final_res, task_id
                 )
                 return
 
             async with self.semaphore:
+                self._mark_generation_task_running(task_id)
                 await self._do_generate_and_send(
                     prompt, unified_msg_origin, images, final_ar, final_res, task_id
                 )
@@ -340,6 +461,12 @@ class ImageGenerationPlugin(Star):
             await self._notify_generation_failure(
                 unified_msg_origin,
                 str(exc) or "生圖服務發生未預期錯誤",
+            )
+            self._remember_generation_task(
+                task_id,
+                "failed",
+                error=str(exc) or "生圖服務發生未預期錯誤",
+                image_count=0,
             )
         finally:
             self._active_generation_tasks.pop(task_id, None)
@@ -375,6 +502,13 @@ class ImageGenerationPlugin(Star):
                 f"[ImageGen] 任務 {task_id} 生成失敗，耗時: {duration:.2f}s, 錯誤: {result.error}"
             )
             await self._notify_generation_failure(unified_msg_origin, result.error)
+            self._remember_generation_task(
+                task_id,
+                "failed",
+                error=result.error,
+                image_count=0,
+                duration=duration,
+            )
             return
 
         logger.info(
@@ -385,6 +519,13 @@ class ImageGenerationPlugin(Star):
             logger.warning(f"[ImageGen] 任務 {task_id} 未返回任何圖片資料")
             await self._notify_generation_failure(
                 unified_msg_origin, "服務未返回任何圖片資料"
+            )
+            self._remember_generation_task(
+                task_id,
+                "failed",
+                error="服務未返回任何圖片資料",
+                image_count=0,
+                duration=duration,
             )
             return
 
@@ -399,6 +540,13 @@ class ImageGenerationPlugin(Star):
             await self._notify_generation_failure(
                 unified_msg_origin, "生成完成，但圖片儲存失敗"
             )
+            self._remember_generation_task(
+                task_id,
+                "failed",
+                error="生成完成，但圖片儲存失敗",
+                image_count=0,
+                duration=duration,
+            )
             return
 
         # 生圖後圖片稽核
@@ -409,6 +557,24 @@ class ImageGenerationPlugin(Star):
         )
         if not image_allowed:
             logger.warning(f"[ImageGen] 任務 {task_id} 圖片稽核未透過: {image_reason}")
+            self._remember_generated_image_metadata(
+                generated_file_paths,
+                task_id=task_id,
+                status="blocked",
+                prompt=prompt,
+                unified_msg_origin=unified_msg_origin,
+                images=images,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+            )
+            self._remember_generation_task(
+                task_id,
+                "blocked",
+                error=image_reason,
+                image_count=len(generated_file_paths),
+                files=self._file_names(generated_file_paths),
+                duration=duration,
+            )
             await self.context.send_message(
                 unified_msg_origin,
                 MessageChain().message(f"❌ 圖像審核未通過：{image_reason}"),
@@ -417,6 +583,16 @@ class ImageGenerationPlugin(Star):
 
         # 記錄使用次數
         self.usage_manager.record_usage(unified_msg_origin)
+        self._remember_generated_image_metadata(
+            generated_file_paths,
+            task_id=task_id,
+            status="generated",
+            prompt=prompt,
+            unified_msg_origin=unified_msg_origin,
+            images=images,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+        )
 
         chain = MessageChain()
         for file_path in generated_file_paths:
@@ -443,7 +619,47 @@ class ImageGenerationPlugin(Star):
         if info_parts:
             chain.message("\n" + "\n".join(info_parts))
 
-        await self.context.send_message(unified_msg_origin, chain)
+        try:
+            await self.context.send_message(unified_msg_origin, chain)
+        except Exception as exc:  # noqa: BLE001
+            self._remember_generated_image_metadata(
+                generated_file_paths,
+                task_id=task_id,
+                status="failed",
+                prompt=prompt,
+                unified_msg_origin=unified_msg_origin,
+                images=images,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+            )
+            self._remember_generation_task(
+                task_id,
+                "failed",
+                error=f"圖片已生成，但發送失敗: {exc}",
+                image_count=len(generated_file_paths),
+                files=self._file_names(generated_file_paths),
+                duration=duration,
+            )
+            logger.error(f"[ImageGen] 任務 {task_id} 圖片發送失敗: {exc}")
+            return
+
+        self._remember_generated_image_metadata(
+            generated_file_paths,
+            task_id=task_id,
+            status="success",
+            prompt=prompt,
+            unified_msg_origin=unified_msg_origin,
+            images=images,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+        )
+        self._remember_generation_task(
+            task_id,
+            "success",
+            image_count=len(generated_file_paths),
+            files=self._file_names(generated_file_paths),
+            duration=duration,
+        )
 
     # ---------------------- 指令處理 ----------------------
 
