@@ -196,6 +196,31 @@
                 <span class="pill" id="cache-pill">--</span>
               </div>
               <div class="file-grid" id="cache-grid"></div>
+              <div class="pager" id="cache-pager">
+                <div class="pager-info" id="cache-page-info">等待載入</div>
+                <div class="pager-actions">
+                  <label class="pager-size" for="cache-page-size">
+                    <span>每頁</span>
+                    <select id="cache-page-size" class="input compact-input">
+                      <option value="12">12</option>
+                      <option value="24">24</option>
+                      <option value="36">36</option>
+                    </select>
+                  </label>
+                  <button class="btn btn-secondary" id="cache-prev" type="button">
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="m15 18-6-6 6-6"></path>
+                    </svg>
+                    <span>上一頁</span>
+                  </button>
+                  <button class="btn btn-secondary" id="cache-next" type="button">
+                    <span>下一頁</span>
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="m9 18 6-6-6-6"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
             </section>
             <section class="panel">
               <div class="panel-header">

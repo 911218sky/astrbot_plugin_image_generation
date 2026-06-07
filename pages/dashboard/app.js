@@ -9,6 +9,11 @@
     historyQuery: "",
     historyStatus: "all",
     cacheImages: [],
+    cachePage: 1,
+    cachePageSize: 12,
+    cacheTotal: 0,
+    cacheTotalPages: 1,
+    cacheLoading: false,
     previewOpen: false,
     previewImage: null,
     timer: null,
@@ -160,6 +165,7 @@
     try {
       state.data = await apiGet("overview");
       render();
+      if (manual) await refreshCache(false);
       if (sync) {
         const at = state.data.summary && state.data.summary.generated_at;
         sync.textContent = at ? `已更新 ${at}` : "已更新";
@@ -188,8 +194,36 @@
     renderSettings(data);
     renderTasksTable(data.tasks || []);
     renderHistory(data.recent_tasks || []);
-    renderCache(data.recent_images || []);
+    renderCache(state.cacheImages);
+    renderCachePager();
     renderModels(data.providers || []);
+  }
+
+  async function refreshCache(manual) {
+    if (!manual && state.previewOpen) return;
+    state.cacheLoading = true;
+    renderCachePager();
+    try {
+      const pageData = await apiGet("images", {
+        page: state.cachePage,
+        page_size: state.cachePageSize,
+      });
+      state.cacheImages = pageData.items || [];
+      state.cachePage = Number(pageData.page) || 1;
+      state.cachePageSize = Number(pageData.page_size) || state.cachePageSize;
+      state.cacheTotal = Number(pageData.total) || 0;
+      state.cacheTotalPages = Number(pageData.total_pages) || 1;
+      const select = byId("cache-page-size");
+      if (select) select.value = String(state.cachePageSize);
+      renderCache(state.cacheImages);
+      renderCachePager();
+      if (manual) showToast("照片快取已重新整理");
+    } catch (error) {
+      showToast(error.message || "照片快取讀取失敗");
+    } finally {
+      state.cacheLoading = false;
+      renderCachePager();
+    }
   }
 
   function taskBadge(task) {
@@ -374,6 +408,30 @@
       .join("");
   }
 
+  function renderCachePager() {
+    const info = byId("cache-page-info");
+    const prev = byId("cache-prev");
+    const next = byId("cache-next");
+    if (info) {
+      if (state.cacheLoading && !state.cacheImages.length) {
+        info.textContent = "圖片載入中...";
+      } else if (!state.cacheTotal) {
+        info.textContent = "沒有圖片";
+      } else {
+        info.textContent = `第 ${state.cachePage} / ${state.cacheTotalPages} 頁，共 ${state.cacheTotal} 張`;
+      }
+    }
+    if (prev) prev.disabled = state.cacheLoading || state.cachePage <= 1;
+    if (next) next.disabled = state.cacheLoading || state.cachePage >= state.cacheTotalPages;
+  }
+
+  function setCachePage(page) {
+    const nextPage = Math.min(Math.max(1, page), state.cacheTotalPages || 1);
+    if (nextPage === state.cachePage && state.cacheImages.length) return;
+    state.cachePage = nextPage;
+    refreshCache(false);
+  }
+
   function imageByIndex(index) {
     const number = Number(index);
     if (!Number.isInteger(number) || number < 0) return null;
@@ -515,6 +573,13 @@
       if (trigger.dataset.action === "preview") openPreview(image);
       if (trigger.dataset.action === "download") downloadImage(image);
     });
+    byId("cache-prev").addEventListener("click", () => setCachePage(state.cachePage - 1));
+    byId("cache-next").addEventListener("click", () => setCachePage(state.cachePage + 1));
+    byId("cache-page-size").addEventListener("change", (event) => {
+      state.cachePageSize = Number(event.target.value) || 12;
+      state.cachePage = 1;
+      refreshCache(false);
+    });
     byId("image-modal").addEventListener("click", (event) => {
       const trigger = event.target.closest('[data-action="close-preview"]');
       if (trigger) closePreview();
@@ -532,6 +597,7 @@
     listenBridgeTheme();
     bindEvents();
     refreshData(false);
+    refreshCache(false);
     state.timer = setInterval(() => refreshData(false), 5000);
     window.addEventListener("beforeunload", () => {
       if (state.timer) clearInterval(state.timer);

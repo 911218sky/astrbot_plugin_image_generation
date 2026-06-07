@@ -574,6 +574,46 @@ p {
   padding: var(--space-4);
 }
 
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+}
+
+.pager-info {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pager-actions,
+.pager-size {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.pager-size {
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.compact-input {
+  width: auto;
+  min-width: 76px;
+  min-height: 34px;
+}
+
+.btn:disabled {
+  color: var(--text-tertiary);
+  background: var(--bg-hover);
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
 .file-card {
   min-width: 0;
   padding: var(--space-3);
@@ -878,6 +918,15 @@ p {
   .image-modal-header h2 {
     max-width: 52vw;
   }
+
+  .pager {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pager-actions {
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 620px) {
@@ -919,5 +968,9 @@ p {
 
   .preview-stage {
     min-height: 260px;
+  }
+
+  .pager-actions .btn {
+    flex: 1 1 120px;
   }
 }

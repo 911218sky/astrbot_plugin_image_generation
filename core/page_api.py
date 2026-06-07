@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import io
+import math
 import mimetypes
 import time
 from pathlib import Path
@@ -24,7 +25,8 @@ class PluginPageApi:
     """Image Generation 官方插件頁 API。"""
 
     IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
-    PREVIEW_LIMIT = 24
+    DEFAULT_IMAGE_PAGE_SIZE = 12
+    MAX_IMAGE_PAGE_SIZE = 48
     ORIGINAL_DATA_MAX_MB = 24
 
     def __init__(self, plugin) -> None:
@@ -44,6 +46,12 @@ class PluginPageApi:
             self.get_image,
             ["GET"],
             "ImageGen Page cached image",
+        )
+        register(
+            f"{PAGE_API_PREFIX}/images",
+            self.get_images,
+            ["GET"],
+            "ImageGen Page cached image list",
         )
 
     async def get_overview(self):
@@ -87,11 +95,27 @@ class PluginPageApi:
             logger.error(f"[ImageGen] Page API 取得圖片失敗: {exc}", exc_info=True)
             return self._error(str(exc))
 
+    async def get_images(self):
+        """分頁回傳快取圖片列表，只為目前頁面產生縮圖。"""
+        try:
+            page = self._positive_int(
+                request.args.get("page"), default=1, maximum=1_000_000
+            )
+            page_size = self._positive_int(
+                request.args.get("page_size"),
+                default=self.DEFAULT_IMAGE_PAGE_SIZE,
+                maximum=self.MAX_IMAGE_PAGE_SIZE,
+            )
+            return self._ok(self._build_image_page(page, page_size))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[ImageGen] Page API 取得圖片列表失敗: {exc}", exc_info=True)
+            return self._error(str(exc))
+
     def _build_snapshot(self) -> dict[str, Any]:
         now_ts = time.time()
         active_tasks = self._collect_active_tasks(now_ts)
         recent_tasks = self._collect_recent_tasks(now_ts)
-        recent_images = self._collect_recent_images()
+        cache_file_count = self._count_cache_images()
         running_count = sum(1 for task in active_tasks if task["status"] == "running")
         queued_count = sum(1 for task in active_tasks if task["status"] == "queued")
         cfg = self.plugin.config_manager
@@ -109,7 +133,7 @@ class PluginPageApi:
             "running_count": running_count,
             "queued_count": queued_count,
             "recent_count": len(recent_tasks),
-            "cache_file_count": len(recent_images),
+            "cache_file_count": cache_file_count,
             "background_tasks": len(task_manager.background_tasks),
             "loop_tasks": len(getattr(task_manager, "_loop_tasks", {})),
             "daily_tasks": len(getattr(task_manager, "_daily_tasks", {})),
@@ -149,7 +173,7 @@ class PluginPageApi:
             "summary": summary,
             "tasks": active_tasks,
             "recent_tasks": recent_tasks,
-            "recent_images": recent_images,
+            "recent_images": [],
             "providers": providers,
             "settings": settings,
         }
@@ -204,7 +228,31 @@ class PluginPageApi:
             "elapsed": max(0.0, now_ts - started_at) if started_at else 0.0,
         }
 
-    def _collect_recent_images(self) -> list[dict[str, Any]]:
+    def _build_image_page(self, page: int, page_size: int) -> dict[str, Any]:
+        image_rows = self._collect_image_rows()
+        total = len(image_rows)
+        total_pages = max(1, math.ceil(total / page_size))
+        current_page = min(max(1, page), total_pages)
+        start = (current_page - 1) * page_size
+        end = start + page_size
+
+        images = []
+        for path, image in image_rows[start:end]:
+            if image["size"] <= self._thumbnail_max_bytes():
+                image["preview_data_url"] = self._make_preview_data_url(path)
+            images.append(image)
+
+        return {
+            "items": images,
+            "page": current_page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
+            "has_prev": current_page > 1,
+            "has_next": current_page < total_pages,
+        }
+
+    def _collect_image_rows(self) -> list[tuple[Path, dict[str, Any]]]:
         cache_dir = Path(self.plugin.cache_dir)
         if not cache_dir.exists():
             return []
@@ -239,16 +287,17 @@ class PluginPageApi:
         self.plugin.image_metadata_store.prune_missing(
             {path.name for path, _ in image_rows}
         )
+        return image_rows
 
-        images = []
-        for index, (path, image) in enumerate(image_rows[:60]):
-            if (
-                index < self.PREVIEW_LIMIT
-                and image["size"] <= self._thumbnail_max_bytes()
-            ):
-                image["preview_data_url"] = self._make_preview_data_url(path)
-            images.append(image)
-        return images
+    def _count_cache_images(self) -> int:
+        cache_dir = Path(self.plugin.cache_dir)
+        if not cache_dir.exists():
+            return 0
+        count = 0
+        for path in cache_dir.iterdir():
+            if path.is_file() and path.suffix.lower() in self.IMAGE_SUFFIXES:
+                count += 1
+        return count
 
     def _resolve_cache_image(self, file_name: str) -> Path | None:
         if not file_name or "/" in file_name or "\\" in file_name:
@@ -363,6 +412,14 @@ class PluginPageApi:
                 return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
             value /= 1024
         return f"{size} B"
+
+    @staticmethod
+    def _positive_int(value: Any, *, default: int, maximum: int) -> int:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = default
+        return min(max(1, number), maximum)
 
     @staticmethod
     def _ok(data: dict[str, Any]) -> dict[str, Any]:
