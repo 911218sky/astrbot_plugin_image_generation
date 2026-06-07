@@ -1,6 +1,8 @@
 (() => {
   "use strict";
 
+  const AUTO_REFRESH_MS = 30000;
+
   const state = {
     data: null,
     page: "overview",
@@ -598,7 +600,7 @@
     bindEvents();
     refreshData(false);
     refreshCache(false);
-    state.timer = setInterval(() => refreshData(false), 5000);
+    state.timer = setInterval(() => refreshData(false), AUTO_REFRESH_MS);
     window.addEventListener("beforeunload", () => {
       if (state.timer) clearInterval(state.timer);
     });
