@@ -1,61 +1,43 @@
-"""AstrBot 官方插件頁 API。
-
-這層只負責把插件執行期狀態整理成前端可讀的快照；不直接觸碰 AstrBot 核心資料。
-"""
-
 from __future__ import annotations
 
 import base64
-import io
-import math
-import mimetypes
 import time
-from pathlib import Path
 from typing import Any
 
 from quart import request
 
 from astrbot.api import logger
 
+from . import page_images
+
 PLUGIN_NAME = "astrbot_plugin_image_generation_911218sky"
 PAGE_API_PREFIX = f"/{PLUGIN_NAME}/page"
 
 
 class PluginPageApi:
-    """Image Generation 官方插件頁 API。"""
-
-    IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    IMAGE_SUFFIXES = page_images.IMAGE_SUFFIXES
     DEFAULT_IMAGE_PAGE_SIZE = 12
     MAX_IMAGE_PAGE_SIZE = 48
     ORIGINAL_DATA_MAX_MB = 24
 
     def __init__(self, plugin) -> None:
         self.plugin = plugin
+        self._images = page_images.PageImageCatalog(
+            plugin.cache_dir, plugin.image_metadata_store
+        )
 
     def register_routes(self) -> None:
-        """註冊官方插件頁需要的 API。"""
         register = self.plugin.context.register_web_api
-        register(
-            f"{PAGE_API_PREFIX}/overview",
-            self.get_overview,
-            ["GET"],
-            "ImageGen Page overview",
+        routes = (
+            ("overview", self.get_overview),
+            ("image", self.get_image),
+            ("images", self.get_images),
         )
-        register(
-            f"{PAGE_API_PREFIX}/image",
-            self.get_image,
-            ["GET"],
-            "ImageGen Page cached image",
-        )
-        register(
-            f"{PAGE_API_PREFIX}/images",
-            self.get_images,
-            ["GET"],
-            "ImageGen Page cached image list",
-        )
+        for suffix, handler in routes:
+            path = f"{PAGE_API_PREFIX}/{suffix}"
+            register(path, handler, ["GET"], f"ImageGen Page {suffix}")
 
     async def get_overview(self):
-        """回傳任務、模型、快取與限制摘要。"""
         try:
             return self._ok(self._build_snapshot())
         except Exception as exc:  # noqa: BLE001
@@ -63,32 +45,32 @@ class PluginPageApi:
             return self._error(str(exc))
 
     async def get_image(self):
-        """回傳快取原圖 data URL，供頁面預覽與下載使用。"""
         try:
             file_name = str(request.args.get("name", "")).strip()
-            path = self._resolve_cache_image(file_name)
-            if path is None:
+            snapshot = self._images.inspect(file_name)
+            if snapshot is None:
                 return self._error("圖片不存在或檔名無效")
 
-            stat = path.stat()
             max_bytes = self._original_data_max_bytes()
-            if stat.st_size > max_bytes:
+            if snapshot.size > max_bytes:
                 return self._error(
                     "圖片檔案過大，無法透過插件頁直接預覽或下載。"
                     f"目前上限 {self._format_size(max_bytes)}。"
                 )
-            mime_type = mimetypes.guess_type(path.name)[0] or "image/png"
-            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
-            metadata = self.plugin.image_metadata_store.get(path.name)
+            payload = self._images.read_original(file_name, max_bytes)
+            if payload is None:
+                return self._error("圖片不存在或檔名無效")
+            encoded = base64.b64encode(payload.data).decode("ascii")
+            image = payload.snapshot
             return self._ok(
                 {
-                    "name": path.name,
-                    "mime_type": mime_type,
-                    "size": stat.st_size,
-                    "size_label": self._format_size(stat.st_size),
-                    "modified_at": self._format_timestamp(stat.st_mtime),
-                    "data_url": f"data:{mime_type};base64,{encoded}",
-                    "metadata": self._format_image_metadata(metadata),
+                    "name": image.name,
+                    "mime_type": payload.mime_type,
+                    "size": image.size,
+                    "size_label": self._format_size(image.size),
+                    "modified_at": self._format_timestamp(image.modified_at),
+                    "data_url": f"data:{payload.mime_type};base64,{encoded}",
+                    "metadata": page_images.format_metadata(image.metadata, self),
                 }
             )
         except Exception as exc:  # noqa: BLE001
@@ -96,7 +78,6 @@ class PluginPageApi:
             return self._error(str(exc))
 
     async def get_images(self):
-        """分頁回傳快取圖片列表，只為目前頁面產生縮圖。"""
         try:
             page = self._positive_int(
                 request.args.get("page"), default=1, maximum=1_000_000
@@ -106,16 +87,24 @@ class PluginPageApi:
                 default=self.DEFAULT_IMAGE_PAGE_SIZE,
                 maximum=self.MAX_IMAGE_PAGE_SIZE,
             )
-            return self._ok(self._build_image_page(page, page_size))
+            image_page = self._images.page(
+                page, page_size, self._original_data_max_bytes()
+            )
+            return self._ok(page_images.format_page(image_page, self))
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ImageGen] Page API 取得圖片列表失敗: {exc}", exc_info=True)
             return self._error(str(exc))
 
     def _build_snapshot(self) -> dict[str, Any]:
         now_ts = time.time()
-        active_tasks = self._collect_active_tasks(now_ts)
+        active_tasks = [
+            self._normalize_task(task_id, raw, now_ts)
+            | {"finished_at": None, "duration": None}
+            for task_id, raw in self.plugin._active_generation_tasks.items()
+        ]
+        active_tasks.sort(key=lambda item: item.get("started_at_ts") or 0)
         recent_tasks = self._collect_recent_tasks(now_ts)
-        cache_file_count = self._count_cache_images()
+        cache_file_count = self._images.count_images()
         running_count = sum(1 for task in active_tasks if task["status"] == "running")
         queued_count = sum(1 for task in active_tasks if task["status"] == "queued")
         cfg = self.plugin.config_manager
@@ -178,16 +167,6 @@ class PluginPageApi:
             "settings": settings,
         }
 
-    def _collect_active_tasks(self, now_ts: float) -> list[dict[str, Any]]:
-        tasks = []
-        for task_id, raw in self.plugin._active_generation_tasks.items():
-            task = self._normalize_task(task_id, raw, now_ts)
-            task["finished_at"] = None
-            task["duration"] = None
-            tasks.append(task)
-        tasks.sort(key=lambda item: item.get("started_at_ts") or 0)
-        return tasks
-
     def _collect_recent_tasks(self, now_ts: float) -> list[dict[str, Any]]:
         tasks = []
         for raw in self.plugin._recent_generation_tasks[:50]:
@@ -228,116 +207,11 @@ class PluginPageApi:
             "elapsed": max(0.0, now_ts - started_at) if started_at else 0.0,
         }
 
-    def _build_image_page(self, page: int, page_size: int) -> dict[str, Any]:
-        image_rows = self._collect_image_rows()
-        total = len(image_rows)
-        total_pages = max(1, math.ceil(total / page_size))
-        current_page = min(max(1, page), total_pages)
-        start = (current_page - 1) * page_size
-        end = start + page_size
-
-        images = []
-        for path, image in image_rows[start:end]:
-            if image["size"] <= self._thumbnail_max_bytes():
-                image["preview_data_url"] = self._make_preview_data_url(path)
-            images.append(image)
-
-        return {
-            "items": images,
-            "page": current_page,
-            "page_size": page_size,
-            "total": total,
-            "total_pages": total_pages,
-            "has_prev": current_page > 1,
-            "has_next": current_page < total_pages,
-        }
-
-    def _collect_image_rows(self) -> list[tuple[Path, dict[str, Any]]]:
-        cache_dir = Path(self.plugin.cache_dir)
-        if not cache_dir.exists():
-            return []
-
-        metadata_by_name = self.plugin.image_metadata_store.get_all()
-        image_rows: list[tuple[Path, dict[str, Any]]] = []
-        for path in cache_dir.iterdir():
-            if not path.is_file() or path.suffix.lower() not in self.IMAGE_SUFFIXES:
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            metadata = metadata_by_name.get(path.name, {})
-            image_rows.append(
-                (
-                    path,
-                    {
-                        "name": path.name,
-                        "size": stat.st_size,
-                        "size_label": self._format_size(stat.st_size),
-                        "modified_at": self._format_timestamp(stat.st_mtime),
-                        "modified_at_ts": stat.st_mtime,
-                        "kind": "generated"
-                        if path.name.startswith("gen_")
-                        else "reference",
-                        "metadata": self._format_image_metadata(metadata),
-                    },
-                )
-            )
-        image_rows.sort(key=lambda item: item[1]["modified_at_ts"], reverse=True)
-        self.plugin.image_metadata_store.prune_missing(
-            {path.name for path, _ in image_rows}
-        )
-        return image_rows
-
-    def _count_cache_images(self) -> int:
-        cache_dir = Path(self.plugin.cache_dir)
-        if not cache_dir.exists():
-            return 0
-        count = 0
-        for path in cache_dir.iterdir():
-            if path.is_file() and path.suffix.lower() in self.IMAGE_SUFFIXES:
-                count += 1
-        return count
-
-    def _resolve_cache_image(self, file_name: str) -> Path | None:
-        if not file_name or "/" in file_name or "\\" in file_name:
-            return None
-        if file_name != Path(file_name).name:
-            return None
-        cache_dir = Path(self.plugin.cache_dir).resolve()
-        path = (cache_dir / file_name).resolve()
-        if path.parent != cache_dir:
-            return None
-        if path.suffix.lower() not in self.IMAGE_SUFFIXES:
-            return None
-        if not path.is_file():
-            return None
-        return path
-
-    def _format_image_metadata(self, metadata: dict[str, Any]) -> dict[str, Any]:
-        status = str(metadata.get("status") or "")
-        return {
-            "known": bool(metadata),
-            "task_id": str(metadata.get("task_id") or ""),
-            "status": status,
-            "status_label": self._status_label(status) if status else "",
-            "prompt": str(metadata.get("prompt") or ""),
-            "prompt_preview": str(metadata.get("prompt_preview") or ""),
-            "model_full": str(metadata.get("model_full") or ""),
-            "provider": str(metadata.get("provider") or ""),
-            "model": str(metadata.get("model") or ""),
-            "user": str(metadata.get("user") or ""),
-            "user_label": self._compact_user(str(metadata.get("user") or "")),
-            "mode": str(metadata.get("mode") or ""),
-            "aspect_ratio": str(metadata.get("aspect_ratio") or ""),
-            "resolution": str(metadata.get("resolution") or ""),
-            "created_at": self._format_timestamp(metadata.get("created_at")),
-            "created_at_ts": self._as_float(metadata.get("created_at")),
-        }
-
     def _original_data_max_bytes(self) -> int:
+        config = getattr(self.plugin, "config_manager", None)
+        usage_settings = getattr(config, "usage_settings", None)
         configured_mb = getattr(
-            self.plugin.config_manager.usage_settings,
+            usage_settings,
             "max_image_size_mb",
             self.ORIGINAL_DATA_MAX_MB,
         )
@@ -346,29 +220,6 @@ class PluginPageApi:
         except (TypeError, ValueError):
             max_mb = float(self.ORIGINAL_DATA_MAX_MB)
         return int(max(1.0, max_mb) * 1024 * 1024)
-
-    def _thumbnail_max_bytes(self) -> int:
-        return self._original_data_max_bytes()
-
-    @staticmethod
-    def _make_preview_data_url(path: Path) -> str:
-        try:
-            from PIL import Image
-        except ImportError:
-            return ""
-
-        try:
-            with Image.open(path) as image:
-                image.thumbnail((320, 220))
-                if image.mode not in {"RGB", "L"}:
-                    image = image.convert("RGB")
-                buffer = io.BytesIO()
-                image.save(buffer, format="JPEG", quality=72, optimize=True)
-            encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-            return f"data:image/jpeg;base64,{encoded}"
-        except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[ImageGen] 產生縮圖失敗: {path.name} - {exc}")
-            return ""
 
     @staticmethod
     def _status_label(status: str) -> str:
@@ -392,9 +243,7 @@ class PluginPageApi:
     @staticmethod
     def _format_timestamp(value: Any) -> str:
         ts = PluginPageApi._as_float(value)
-        if not ts:
-            return ""
-        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else ""
 
     @staticmethod
     def _as_float(value: Any) -> float:

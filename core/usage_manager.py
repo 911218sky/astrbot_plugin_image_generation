@@ -76,12 +76,6 @@ class UsageManager:
         return uid in self._settings.umo_blacklist
 
     def check_rate_limit(self, user_id: str) -> bool | str:
-        """檢查使用者請求頻率限制和每日限制。
-
-        返回:
-            - True: 檢查透過
-            - str: 錯誤訊息
-        """
         # 1. 檢查頻率限制
         if self.is_session_blocked(user_id):
             return self._settings.blacklist_block_message
@@ -94,33 +88,27 @@ class UsageManager:
                 return f"❌ 請求過於頻繁，請在 {remaining} 秒後再試"
             self._user_request_timestamps[user_id] = now
 
-        # 2. 檢查每日限制
-        if self._settings.enable_daily_limit:
-            today = datetime.date.today().isoformat()
-            if today not in self._usage_data:
-                self._usage_data[today] = {}
-
-            count = self._usage_data[today].get(user_id, 0)
-            if count >= self._settings.daily_limit_count:
-                return f"❌ 您今日的生圖額度已用完 ({self._settings.daily_limit_count}次)，請明天再試"
-
         return True
 
     def record_usage(self, user_id: str) -> None:
         """記錄使用者使用次數。"""
         if self._settings.enable_daily_limit:
-            today = datetime.date.today().isoformat()
-            if today not in self._usage_data:
-                self._usage_data[today] = {}
-            self._usage_data[today][user_id] = (
-                self._usage_data[today].get(user_id, 0) + 1
-            )
-            self._save_usage_data()
+            self.record_usage_for(user_id, datetime.date.today().isoformat())
+
+    def record_usage_for(self, user_id: str, date_bucket: str) -> None:
+        if date_bucket not in self._usage_data:
+            self._usage_data[date_bucket] = {}
+        self._usage_data[date_bucket][user_id] = (
+            self._usage_data[date_bucket].get(user_id, 0) + 1
+        )
+        self._save_usage_data()
 
     def get_usage_count(self, user_id: str) -> int:
         """取得使用者今日使用次數。"""
-        today = datetime.date.today().isoformat()
-        return self._usage_data.get(today, {}).get(user_id, 0)
+        return self.get_usage_count_for(user_id, datetime.date.today().isoformat())
+
+    def get_usage_count_for(self, user_id: str, date_bucket: str) -> int:
+        return self._usage_data.get(date_bucket, {}).get(user_id, 0)
 
     def get_daily_limit(self) -> int:
         """取得每日限制次數。"""
