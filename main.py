@@ -806,12 +806,13 @@ class ImageGenerationPlugin(Star):
                             "[ImageGen] @self alias was used, but the bot avatar could not be loaded"
                         )
 
-        msg = "已啟動生圖任務"
-        if images_data:
-            msg += f" [參考圖 {len(images_data)} 張]"
-        if matched_preset:
-            msg += f" [預設：{matched_preset}]"
-        yield event.plain_result(msg)
+        if self.config_manager.show_task_started:
+            msg = "已啟動生圖任務"
+            if images_data:
+                msg += f" [參考圖 {len(images_data)} 張]"
+            if matched_preset:
+                msg += f" [預設：{matched_preset}]"
+            yield event.plain_result(msg)
 
         task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
 

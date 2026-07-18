@@ -428,11 +428,13 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         mode = "圖生圖" if images_data else "文生圖"
         ref_info = f" [參考圖 {len(images_data)} 張]" if images_data else ""
         notice = f"✅ 已啟動{mode}任務{ref_info}（任務 ID：{task_id}）"
-        await plugin.context.send_message(
-            event.unified_msg_origin,
-            MessageChain().message(notice),
-        )
-        return notice
+        if plugin.config_manager.show_task_started:
+            await plugin.context.send_message(
+                event.unified_msg_origin,
+                MessageChain().message(notice),
+            )
+            return notice
+        return f"已建立{mode}任務，背景生成中。"
 
 
 def adjust_tool_parameters(

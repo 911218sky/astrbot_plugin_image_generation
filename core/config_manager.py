@@ -41,6 +41,7 @@ class GenerationSettings:
     default_aspect_ratio: str = "自動"
     default_resolution: str = "1K"
     max_concurrent_tasks: int = 3
+    show_task_started: bool = False
     show_generation_info: bool = False
     show_model_info: bool = False
 
@@ -250,6 +251,7 @@ class ConfigManager:
             default_aspect_ratio=gen_cfg.get("default_aspect_ratio", "自動"),
             default_resolution=gen_cfg.get("default_resolution", "1K"),
             max_concurrent_tasks=max(1, gen_cfg.get("max_concurrent_tasks", 3)),
+            show_task_started=gen_cfg.get("show_task_started", False),
             show_generation_info=gen_cfg.get("show_generation_info", False),
             show_model_info=gen_cfg.get("show_model_info", False),
         )
@@ -428,6 +430,10 @@ class ConfigManager:
     def show_generation_info(self) -> bool:
         """是否顯示生成資訊。"""
         return self._plugin_config.generation_settings.show_generation_info
+
+    @property
+    def show_task_started(self) -> bool:
+        return self._plugin_config.generation_settings.show_task_started
 
     @property
     def show_model_info(self) -> bool:
