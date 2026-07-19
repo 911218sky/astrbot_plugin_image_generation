@@ -284,6 +284,8 @@ class ConfigManager:
             umo_blacklist=umo_blacklist,
             blacklist_block_message=blacklist_block_message,
         )
+        for provider_config in self._all_provider_configs:
+            provider_config.max_image_size_mb = max_image_size_mb
 
         # 快取設定
         self._plugin_config.cache_settings = CacheSettings(

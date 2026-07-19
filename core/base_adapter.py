@@ -9,6 +9,7 @@ import aiohttp
 from astrbot.api import logger
 
 from .constants import DEFAULT_DOWNLOAD_TIMEOUT
+from .provider_transport import MAX_PROVIDER_IMAGE_BYTES, provider_image_limit
 from .types import AdapterConfig, GenerationRequest, GenerationResult, ImageCapability
 from .utils import mask_sensitive
 
@@ -26,6 +27,10 @@ class BaseImageAdapter(abc.ABC):
         self.timeout = config.timeout
         self.download_timeout = DEFAULT_DOWNLOAD_TIMEOUT
         self.max_retry_attempts = min(5, max(1, config.max_retry_attempts))
+        self.max_image_size_bytes = min(
+            MAX_PROVIDER_IMAGE_BYTES,
+            max(1, config.max_image_size_mb) * 1024 * 1024,
+        )
         self.safety_settings = config.safety_settings
         self._session: aiohttp.ClientSession | None = None
 
@@ -116,7 +121,8 @@ class BaseImageAdapter(abc.ABC):
         prefix = self._get_log_prefix(request.task_id)
         last_error = "未配置 API Key"
         for attempt in range(1, self.max_retry_attempts + 1):
-            images, err = await self._generate_once(request)
+            with provider_image_limit(self.max_image_size_bytes):
+                images, err = await self._generate_once(request)
             if images is not None:
                 if attempt > 1:
                     logger.info(

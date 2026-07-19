@@ -672,6 +672,11 @@ class ImageGenerationPlugin(Star):
             )
             return
 
+        max_image_size_mb = getattr(self.image_processor, "max_image_size_mb", 30)
+        max_image_bytes = max_image_size_mb * 1024 * 1024
+        oversized_count = sum(
+            len(img_bytes) > max_image_bytes for img_bytes in result.images
+        )
         generated_file_paths: list[str] = []
         for index, img_bytes in enumerate(result.images, 1):
             file_path = self.image_processor.save_generated_image(
@@ -682,13 +687,18 @@ class ImageGenerationPlugin(Star):
 
         if not generated_file_paths:
             logger.warning(f"[ImageGen] 任務 {task_id} 未能儲存任何生成圖片")
+            storage_error = (
+                f"生成完成，但圖片超過大小限制（{max_image_size_mb} MiB）"
+                if oversized_count == len(result.images)
+                else "生成完成，但圖片儲存失敗"
+            )
             await self._notify_generation_failure(
-                unified_msg_origin, "生成完成，但圖片儲存失敗"
+                unified_msg_origin, storage_error
             )
             self._remember_generation_task(
                 task_id,
                 "failed",
-                error="生成完成，但圖片儲存失敗",
+                error=storage_error,
                 image_count=0,
                 duration=duration,
             )
@@ -734,6 +744,10 @@ class ImageGenerationPlugin(Star):
         info_parts = []
         if partial_error:
             info_parts.append(f"批量提醒：{partial_error}")
+        if oversized_count:
+            info_parts.append(
+                f"已略過 {oversized_count} 張超過大小限制的圖片（上限 {max_image_size_mb} MiB）"
+            )
         if self.config_manager.show_generation_info:
             info_parts.append(
                 f"完成。\n耗時：{duration:.2f}s\n圖片數量：{len(generated_file_paths)}"

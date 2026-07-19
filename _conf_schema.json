@@ -379,7 +379,7 @@
       },
       "max_concurrent_tasks": {
         "description": "最大併發任務數",
-        "hint": "同時生成圖片的最大數量,防止資源耗盡",
+        "hint": "同時生成圖片的最大數量，防止資源耗盡；高解析度圖片建議設定為 1 到 3",
         "type": "int",
         "slider": {
           "min": 1,
@@ -490,7 +490,7 @@
       },
       "max_image_size_mb": {
         "description": "最大圖片限制 (MB)",
-        "hint": "允許上傳的參考圖最大大小,超過此大小的圖片將被忽略",
+        "hint": "限制參考圖與生成圖片的檔案大小；超過此大小的圖片不會儲存或傳送",
         "type": "int",
         "slider": {
           "min": 1,

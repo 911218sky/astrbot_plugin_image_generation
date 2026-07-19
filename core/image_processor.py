@@ -159,6 +159,10 @@ class ImageProcessor:
     def cache_dir(self) -> str:
         return self._cache_dir
 
+    @property
+    def max_image_size_mb(self) -> int:
+        return self._max_image_size_mb
+
     async def download_image(self, url: str) -> tuple[bytes, str] | None:
         try:
             path = url
