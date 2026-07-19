@@ -521,14 +521,20 @@ class ImageGenerationPlugin(Star):
         }
         try:
             await self.admission_controller.wait(admission_ticket)
-            if not self.generator or not self.generator.adapter:
+            if not self.generator:
                 await self.context.send_message(
                     unified_msg_origin,
                     MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
                 )
                 return
 
-            capabilities = self.generator.adapter.get_capabilities()
+            capabilities = await self.generator.get_capabilities()
+            if capabilities is None:
+                await self.context.send_message(
+                    unified_msg_origin,
+                    MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
+                )
+                return
             if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
                 logger.warning(
                     f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"

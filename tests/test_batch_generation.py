@@ -4,7 +4,11 @@ import anyio
 import pytest
 
 from astrbot_plugin_image_generation.core.generator import ImageGenerator
-from astrbot_plugin_image_generation.core.types import GenerationRequest, GenerationResult
+from astrbot_plugin_image_generation.core.types import (
+    GenerationRequest,
+    GenerationResult,
+    ImageCapability,
+)
 
 
 class FakeAdapter:
@@ -22,6 +26,9 @@ class FakeAdapter:
         if request.task_id and request.task_id.endswith("-2"):
             return GenerationResult(images=None, error="fake provider failure")
         return GenerationResult(images=[f"image:{request.task_id}".encode()])
+
+    def get_capabilities(self) -> ImageCapability:
+        return ImageCapability.TEXT_TO_IMAGE
 
 
 class BlockingAdapter(FakeAdapter):
@@ -131,3 +138,44 @@ async def test_adapter_switch_waits_for_active_generation() -> None:
 
     assert old_adapter.closed is True
     assert generator.adapter is new_adapter
+
+
+@pytest.mark.asyncio
+async def test_generation_waits_for_adapter_replacement() -> None:
+    old_adapter = FakeAdapter()
+    new_adapter = FakeAdapter()
+    generator = make_generator(old_adapter)
+    generator._ensure_lifecycle()
+
+    async with generator._lifecycle_condition:
+        generator._adapter_updating = True
+
+    result_holder: list[GenerationResult] = []
+
+    async def run_generation() -> None:
+        result_holder.append(
+            await generator.generate(
+                GenerationRequest(prompt="cat", task_id="task")
+            )
+        )
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(run_generation)
+        await anyio.sleep(0)
+        assert not old_adapter.calls
+        async with generator._lifecycle_condition:
+            generator.adapter = new_adapter
+            generator._adapter_updating = False
+            generator._lifecycle_condition.notify_all()
+
+    assert result_holder[0].images == [b"image:task"]
+    assert new_adapter.calls == ["task"]
+
+
+@pytest.mark.asyncio
+async def test_get_capabilities_uses_lifecycle_guard() -> None:
+    generator = make_generator(FakeAdapter())
+
+    capabilities = await generator.get_capabilities()
+
+    assert capabilities == ImageCapability.TEXT_TO_IMAGE

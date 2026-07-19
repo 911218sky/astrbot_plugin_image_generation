@@ -18,6 +18,7 @@ from .types import (
     GenerationRequest,
     GenerationResult,
     ImageData,
+    ImageCapability,
 )
 from .constants import DEFAULT_MAX_BATCH_COUNT
 from .utils import convert_images_batch, normalize_batch_count
@@ -58,9 +59,6 @@ class ImageGenerator:
 
     async def generate(self, request: GenerationRequest) -> GenerationResult:
         """執行生圖邏輯。"""
-        if not self.adapter:
-            return GenerationResult(images=None, error="適配器未初始化")
-
         # 先將參考圖批次轉換成相容格式，再呼叫下游適配器
         converted_images: list[ImageData] = []
         if request.images:
@@ -129,6 +127,16 @@ class ImageGenerator:
                 ),
             )
         return GenerationResult(images=successful_images, error=None)
+
+    async def get_capabilities(self) -> ImageCapability | None:
+        """取得目前適配器能力，等待模型切換完成。"""
+        adapter = await self._acquire_adapter()
+        if adapter is None:
+            return None
+        try:
+            return adapter.get_capabilities()
+        finally:
+            await self._release_adapter()
 
     async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
         adapter = await self._acquire_adapter()
