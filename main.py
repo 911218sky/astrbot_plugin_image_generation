@@ -528,32 +528,6 @@ class ImageGenerationPlugin(Star):
                 )
                 return
 
-            capabilities = await self.generator.get_capabilities()
-            if capabilities is None:
-                await self.context.send_message(
-                    unified_msg_origin,
-                    MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
-                )
-                return
-            if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
-                logger.warning(
-                    f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"
-                )
-                images_data = None
-            if (
-                not capabilities & ImageCapability.ASPECT_RATIO
-                and aspect_ratio != "自動"
-            ):
-                logger.info(
-                    f"[ImageGen] 當前適配器不支援指定比例，已忽略參數: {aspect_ratio}"
-                )
-                aspect_ratio = "自動"
-            if not capabilities & ImageCapability.RESOLUTION and resolution != "1K":
-                logger.info(
-                    f"[ImageGen] 當前適配器不支援指定解析度，已忽略參數: {resolution}"
-                )
-                resolution = "1K"
-
             final_ar = validate_aspect_ratio(aspect_ratio) or None
             if final_ar == "自動":
                 final_ar = None

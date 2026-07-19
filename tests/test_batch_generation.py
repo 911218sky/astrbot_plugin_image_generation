@@ -47,6 +47,19 @@ class BlockingAdapter(FakeAdapter):
         self.closed = True
 
 
+class TextOnlyRecordingAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[GenerationRequest] = []
+
+    def get_capabilities(self) -> ImageCapability:
+        return ImageCapability.TEXT_TO_IMAGE
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.requests.append(request)
+        return await super().generate(request)
+
+
 def make_generator(adapter: FakeAdapter, parallelism: int = 2) -> ImageGenerator:
     generator = object.__new__(ImageGenerator)
     generator.adapter = adapter
@@ -179,3 +192,22 @@ async def test_get_capabilities_uses_lifecycle_guard() -> None:
     capabilities = await generator.get_capabilities()
 
     assert capabilities == ImageCapability.TEXT_TO_IMAGE
+
+
+@pytest.mark.asyncio
+async def test_generation_filters_unsupported_parameters_under_adapter_guard() -> None:
+    adapter = TextOnlyRecordingAdapter()
+    generator = make_generator(adapter)
+
+    result = await generator.generate(
+        GenerationRequest(
+            prompt="cat",
+            task_id="task",
+            aspect_ratio="16:9",
+            resolution="4K",
+        )
+    )
+
+    assert result.images == [b"image:task"]
+    assert adapter.requests[0].aspect_ratio is None
+    assert adapter.requests[0].resolution is None

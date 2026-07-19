@@ -143,7 +143,25 @@ class ImageGenerator:
         if adapter is None:
             return GenerationResult(images=None, error="適配器未初始化")
         try:
-            result = await adapter.generate(request)
+            capabilities = adapter.get_capabilities()
+            images = request.images
+            aspect_ratio = request.aspect_ratio
+            resolution = request.resolution
+            if not capabilities & ImageCapability.IMAGE_TO_IMAGE:
+                images = []
+            if not capabilities & ImageCapability.ASPECT_RATIO:
+                aspect_ratio = None
+            if not capabilities & ImageCapability.RESOLUTION:
+                resolution = None
+            adapter_request = GenerationRequest(
+                prompt=request.prompt,
+                images=images,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+                task_id=request.task_id,
+                count=1,
+            )
+            result = await adapter.generate(adapter_request)
             if result.images and len(result.images) > 1:
                 logger.warning(
                     f"[ImageGen] 適配器一次返回 {len(result.images)} 張圖片，僅採用第一張"
