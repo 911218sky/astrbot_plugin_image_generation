@@ -129,7 +129,10 @@ class ConfigManager:
         safety_cfg = self._config.get("safety_audit", {})
         api_providers_raw = self._config.get("api_providers", [])
 
-        self._plugin_config.enable_llm_tool = self._config.get("enable_llm_tool", True)
+        raw_enable_llm_tool = self._config.get("enable_llm_tool", True)
+        self._plugin_config.enable_llm_tool = (
+            raw_enable_llm_tool if isinstance(raw_enable_llm_tool, bool) else True
+        )
         max_retry_attempts = _bounded_int(
             gen_cfg.get("max_retry_attempts", DEFAULT_MAX_RETRY_ATTEMPTS),
             DEFAULT_MAX_RETRY_ATTEMPTS,

@@ -36,6 +36,9 @@ class ImageGenerator:
         self.adapter = self._create_adapter(adapter_config)
         self._max_batch_count = normalize_batch_count(max_batch_count, 10)
         self._batch_limiter = anyio.CapacityLimiter(max(1, batch_parallelism))
+        self._lifecycle_condition = anyio.Condition()
+        self._active_generations = 0
+        self._adapter_updating = False
 
     def _create_adapter(self, config: AdapterConfig):
         """根據配置建立對應的適配器。"""
@@ -128,8 +131,11 @@ class ImageGenerator:
         return GenerationResult(images=successful_images, error=None)
 
     async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
+        adapter = await self._acquire_adapter()
+        if adapter is None:
+            return GenerationResult(images=None, error="適配器未初始化")
         try:
-            result = await self.adapter.generate(request)
+            result = await adapter.generate(request)
             if result.images and len(result.images) > 1:
                 logger.warning(
                     f"[ImageGen] 適配器一次返回 {len(result.images)} 張圖片，僅採用第一張"
@@ -139,6 +145,31 @@ class ImageGenerator:
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ImageGen] 生成失敗: {exc}", exc_info=True)
             return GenerationResult(images=None, error=str(exc))
+        finally:
+            await self._release_adapter()
+
+    async def _acquire_adapter(self):
+        self._ensure_lifecycle()
+        async with self._lifecycle_condition:
+            while self._adapter_updating:
+                await self._lifecycle_condition.wait()
+            adapter = self.adapter
+            if adapter is not None:
+                self._active_generations += 1
+            return adapter
+
+    async def _release_adapter(self) -> None:
+        self._ensure_lifecycle()
+        async with self._lifecycle_condition:
+            self._active_generations -= 1
+            if self._active_generations == 0:
+                self._lifecycle_condition.notify_all()
+
+    def _ensure_lifecycle(self) -> None:
+        if not hasattr(self, "_lifecycle_condition"):
+            self._lifecycle_condition = anyio.Condition()
+            self._active_generations = 0
+            self._adapter_updating = False
 
     def update_model(self, model: str) -> None:
         """更新適配器使用的模型。"""
@@ -150,12 +181,42 @@ class ImageGenerator:
 
         注意: 此方法會關閉舊適配器以釋放資源。
         """
-        if self.adapter:
-            await self.adapter.close()
-        self.adapter_config = adapter_config
-        self.adapter = self._create_adapter(adapter_config)
+        self._ensure_lifecycle()
+        async with self._lifecycle_condition:
+            self._adapter_updating = True
+            while self._active_generations:
+                await self._lifecycle_condition.wait()
+            old_adapter = self.adapter
+            self.adapter = None
+        try:
+            if old_adapter:
+                await old_adapter.close()
+            new_adapter = self._create_adapter(adapter_config)
+        except BaseException:
+            async with self._lifecycle_condition:
+                self.adapter = old_adapter
+                self._adapter_updating = False
+                self._lifecycle_condition.notify_all()
+            raise
+        async with self._lifecycle_condition:
+            self.adapter_config = adapter_config
+            self.adapter = new_adapter
+            self._adapter_updating = False
+            self._lifecycle_condition.notify_all()
 
     async def close(self) -> None:
         """關閉適配器。"""
-        if self.adapter:
-            await self.adapter.close()
+        self._ensure_lifecycle()
+        async with self._lifecycle_condition:
+            self._adapter_updating = True
+            while self._active_generations:
+                await self._lifecycle_condition.wait()
+            adapter = self.adapter
+            self.adapter = None
+        try:
+            if adapter:
+                await adapter.close()
+        finally:
+            async with self._lifecycle_condition:
+                self._adapter_updating = False
+                self._lifecycle_condition.notify_all()

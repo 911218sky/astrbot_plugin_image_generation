@@ -24,6 +24,22 @@ class FakeAdapter:
         return GenerationResult(images=[f"image:{request.task_id}".encode()])
 
 
+class BlockingAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = anyio.Event()
+        self.release = anyio.Event()
+        self.closed = False
+
+    async def generate(self, request: GenerationRequest) -> GenerationResult:
+        self.started.set()
+        await self.release.wait()
+        return GenerationResult(images=[f"image:{request.task_id}".encode()])
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def make_generator(adapter: FakeAdapter, parallelism: int = 2) -> ImageGenerator:
     generator = object.__new__(ImageGenerator)
     generator.adapter = adapter
@@ -86,3 +102,32 @@ async def test_provider_multiple_images_are_reduced_to_one_per_request() -> None
     )
 
     assert result.images == [b"first", b"first"]
+
+
+@pytest.mark.asyncio
+async def test_adapter_switch_waits_for_active_generation() -> None:
+    old_adapter = BlockingAdapter()
+    new_adapter = FakeAdapter()
+    generator = make_generator(old_adapter)
+    generator._create_adapter = lambda _config: new_adapter
+
+    switched = anyio.Event()
+
+    async def switch() -> None:
+        await generator.update_adapter("new-config")
+        switched.set()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(
+            generator.generate,
+            GenerationRequest(prompt="cat", task_id="task"),
+        )
+        await old_adapter.started.wait()
+        task_group.start_soon(switch)
+        await anyio.sleep(0)
+        assert not switched.is_set()
+        old_adapter.release.set()
+        await switched.wait()
+
+    assert old_adapter.closed is True
+    assert generator.adapter is new_adapter

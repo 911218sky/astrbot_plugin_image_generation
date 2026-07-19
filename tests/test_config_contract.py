@@ -72,6 +72,22 @@ def test_task_started_notice_requires_a_boolean(
     assert manager.show_task_started is expected
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(True, True, id="enabled"),
+        pytest.param(False, False, id="disabled"),
+        pytest.param("false", True, id="string-falls-back-to-enabled"),
+        pytest.param(0, True, id="integer-falls-back-to-enabled"),
+        pytest.param(None, True, id="null-falls-back-to-enabled"),
+    ],
+)
+def test_llm_tool_setting_requires_a_boolean(raw: JsonValue, expected: bool) -> None:
+    manager, _ = load_config({"enable_llm_tool": raw})
+
+    assert manager.enable_llm_tool is expected
+
+
 def test_baseline_schema_is_valid_json_with_generation_object() -> None:
     schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
 

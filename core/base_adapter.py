@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import re
 
 import aiohttp
 
@@ -128,7 +129,7 @@ class BaseImageAdapter(abc.ABC):
                 f"{prefix} 第 {attempt}/{self.max_retry_attempts} 次嘗試失敗: "
                 f"{last_error}"
             )
-            if attempt < self.max_retry_attempts:
+            if attempt < self.max_retry_attempts and self._is_retryable_error(last_error):
                 self._rotate_api_key()
                 logger.info(
                     f"{prefix} 已排程第 {attempt + 1}/{self.max_retry_attempts} 次重試"
@@ -143,6 +144,14 @@ class BaseImageAdapter(abc.ABC):
             f"{prefix} 已達最大重試次數 {self.max_retry_attempts} 次，最終失敗: {last_error}"
         )
         return GenerationResult(images=None, error=last_error)
+
+    @staticmethod
+    def _is_retryable_error(error: str) -> bool:
+        match = re.search(r"API 錯誤 \((\d{3})\)", error)
+        if match:
+            status = int(match.group(1))
+            return status in {408, 409, 425, 429} or status >= 500
+        return not error.startswith(("未配置 API Key", "提示詞未通過審核"))
 
     def _pre_generate(self, request: GenerationRequest) -> GenerationResult | None:
         """生成前的預處理檢查。

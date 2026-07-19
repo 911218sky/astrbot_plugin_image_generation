@@ -6,6 +6,7 @@ AstrBot 圖像生成插件主模組
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import datetime
 import hashlib
 import json
@@ -173,6 +174,8 @@ class ImageGenerationPlugin(Star):
         self._jimeng_task_adapter: BaseImageAdapter | None = None
         self._active_generation_tasks: dict[str, dict[str, Any]] = {}
         self._recent_generation_tasks: list[dict[str, Any]] = []
+        self._image_generation_tool: ImageGenerationTool | None = None
+        self._image_tool_base_parameters: dict[str, Any] | None = None
         self.page_api = None
 
         self._register_official_page_api_if_available()
@@ -193,6 +196,8 @@ class ImageGenerationPlugin(Star):
         # 註冊 LLM 工具
         if self.config_manager.enable_llm_tool and self.generator:
             tool = ImageGenerationTool(plugin=self)
+            self._image_generation_tool = tool
+            self._image_tool_base_parameters = deepcopy(tool.parameters)
             self._adjust_tool_parameters(tool)
             self.context.add_llm_tools(tool)
             logger.info("[ImageGen] 已註冊圖像生成工具")
@@ -282,7 +287,19 @@ class ImageGenerationPlugin(Star):
         if not self.generator or not self.generator.adapter:
             return
         capabilities = self.generator.adapter.get_capabilities()
-        adjust_tool_parameters(tool, capabilities)
+        adjust_tool_parameters(tool, capabilities, self.config_manager.max_batch_count)
+
+    def _refresh_image_tool_parameters(self) -> None:
+        if (
+            self._image_generation_tool is None
+            or self._image_tool_base_parameters is None
+        ):
+            return
+        self._image_generation_tool.parameters.clear()
+        self._image_generation_tool.parameters.update(
+            deepcopy(self._image_tool_base_parameters)
+        )
+        self._adjust_tool_parameters(self._image_generation_tool)
 
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
         """建立後臺任務並新增到管理器中。"""
@@ -1026,10 +1043,11 @@ class ImageGenerationPlugin(Star):
                 self.config_manager.save_model_setting(raw_model)
                 self.config_manager.reload()
 
-                if self.generator:
+                if self.generator and self.config_manager.adapter_config:
                     await self.generator.update_adapter(
                         self.config_manager.adapter_config
                     )
+                    self._refresh_image_tool_parameters()
 
                 yield event.plain_result(f"✅ 已切換模型：{raw_model}")
             else:
