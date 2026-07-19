@@ -21,7 +21,7 @@ from astrbot.core.astr_agent_context import AstrAgentContext
 from .admission import AdmissionDenied
 from .reference_collector import ReferenceRejected
 from .types import ImageCapability
-from .utils import extract_self_avatar_alias
+from .utils import extract_self_avatar_alias, normalize_batch_count
 
 if TYPE_CHECKING:
     pass
@@ -229,7 +229,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         "生成或編輯圖片。當使用者希望實際產出圖片時就應使用這個工具，"
         "包括繪圖、重繪、風格轉換、製作頭像、貼圖、迷因、海報、縮圖、"
         "人像、表情圖或各種圖片變體。若當前訊息含有圖片、引用圖片或 @ 使用者，"
-        "工具會自動把這些內容作為參考圖。"
+        "工具會自動把這些內容作為參考圖；需要多張變體時可用 count。"
     )
     parameters: dict = Field(
         default_factory=lambda: {
@@ -263,6 +263,13 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                     "enum": ["1K", "2K", "4K"],
                     "default": "1K",
                 },
+                "count": {
+                    "type": "integer",
+                    "description": "要生成的圖片數量，預設 1；只在使用者明確要求多張或多個變體時增加。",
+                    "minimum": 1,
+                    "maximum": 10,
+                    "default": 1,
+                },
                 "avatar_references": {
                     "type": "array",
                     "description": "可選的頭像參考來源，用於圖生圖或角色對齊。可填入 `self` 代表機器人頭像、`sender` 代表當前使用者，或直接填使用者 ID。當使用者寫 @self，或需求明確需要機器人自身形象時，填入 `self`。",
@@ -290,6 +297,10 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
         plugin = self.plugin
         if not plugin:
             return "❌ 插件未正確初始化"
+
+        batch_count = normalize_batch_count(
+            kwargs.get("count", 1), plugin.config_manager.max_batch_count
+        )
 
         # 取得事件上下文
         event = None
@@ -324,7 +335,9 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
             )
             return "❌ 未配置 API Key，無法生成圖片"
 
-        admission = await plugin.reserve_generation(event.unified_msg_origin)
+        admission = await plugin.reserve_generation(
+            event.unified_msg_origin, batch_count
+        )
         if isinstance(admission, AdmissionDenied):
             return plugin.generation_admission_error(admission)
 
@@ -389,6 +402,7 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                     or plugin.config_manager.default_aspect_ratio,
                     resolution=resolution or plugin.config_manager.default_resolution,
                     task_id=task_id,
+                    batch_count=batch_count,
                     admission_ticket=admission_ticket,
                 )
             )
@@ -396,7 +410,8 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
 
             mode = "圖生圖" if images_data else "文生圖"
             ref_info = f" [參考圖 {len(images_data)} 張]" if images_data else ""
-            notice = f"✅ 已啟動{mode}任務{ref_info}（任務 ID：{task_id}）"
+            count_info = f" ×{batch_count}" if batch_count > 1 else ""
+            notice = f"✅ 已啟動{mode}任務{count_info}{ref_info}（任務 ID：{task_id}）"
             if plugin.config_manager.show_task_started:
                 await plugin.context.send_message(
                     event.unified_msg_origin,

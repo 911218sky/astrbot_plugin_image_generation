@@ -288,11 +288,16 @@ class ImageProcessor:
                 f"[ImageGen] 已清理 {deleted_count}/{len(to_delete)} 箇舊快取檔案 (按數量)"
             )
 
-    def save_generated_image(self, task_id: str, img_bytes: bytes) -> str | None:
+    def save_generated_image(
+        self, task_id: str, img_bytes: bytes, sequence: int = 1
+    ) -> str | None:
         try:
             import time
 
-            file_name = f"gen_{task_id}_{int(time.time())}_{hashlib.md5(img_bytes).hexdigest()[:6]}.png"
+            file_name = (
+                f"gen_{task_id}_{int(time.time())}_{sequence}_"
+                f"{hashlib.md5(img_bytes).hexdigest()[:6]}.png"
+            )
             file_path = os.path.join(self._cache_dir, file_name)
             Path(file_path).write_bytes(img_bytes)
             return file_path

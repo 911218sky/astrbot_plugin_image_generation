@@ -176,6 +176,30 @@ async def test_daily_limit_one_race_reserves_exactly_one_pending_quota() -> None
 
 
 @pytest.mark.asyncio
+async def test_batch_quota_reservation_refunds_unsuccessful_outputs() -> None:
+    module = _admission_module()
+    ledger = FakeLedger()
+    controller = module.AdmissionController(
+        module.AdmissionLimits(active=2, queued=1),
+        ledger,
+        MutableClock(date(2026, 7, 17)).today,
+    )
+
+    ticket = await controller.reserve("umo:batch", True, 3, units=3)
+    assert isinstance(ticket, module.AdmissionTicket)
+    denied = await controller.reserve("umo:batch", True, 3, units=1)
+    assert isinstance(denied, module.AdmissionDenied)
+
+    await controller.commit(ticket, units=2)
+    await controller.release(ticket)
+
+    assert ledger.get_usage_count_for("umo:batch", "2026-07-17") == 2
+    next_ticket = await controller.reserve("umo:batch", True, 3, units=1)
+    assert isinstance(next_ticket, module.AdmissionTicket)
+    await controller.release(next_ticket)
+
+
+@pytest.mark.asyncio
 async def test_ticket_snapshot_survives_midnight_and_quota_reload() -> None:
     # Given
     module = _admission_module()

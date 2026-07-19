@@ -17,7 +17,9 @@ class TaskManager:
         self._loop_tasks: dict[str, asyncio.Task] = {}
         self._daily_tasks: dict[str, asyncio.Task] = {}
         self._last_run_dates: dict[str, str] = {}  # 記錄每日任務上次執行的日期
-        self._startup_tasks: list[Callable[[], Coroutine[Any, Any, Any]]] = []
+        self._startup_tasks: list[
+            tuple[str, Callable[[], Coroutine[Any, Any, Any]]]
+        ] = []
         self._startup_completed: bool = False
 
     def create_task(
@@ -28,8 +30,22 @@ class TaskManager:
         if name:
             task.set_name(name)
         self.background_tasks.add(task)
-        task.add_done_callback(self.background_tasks.discard)
+        task.add_done_callback(self._on_background_task_done)
         return task
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        self.background_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error(
+                f"[ImageGen] [TaskManager] 背景任務 {task.get_name()} 執行失敗: {error}",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     def start_loop_task(
         self,
@@ -89,7 +105,9 @@ class TaskManager:
     def _on_loop_task_done(self, name: str, task: asyncio.Task) -> None:
         """定時任務結束時的回呼。"""
         self.background_tasks.discard(task)
-        self._loop_tasks.pop(name, None)
+        if self._loop_tasks.get(name) is task:
+            self._loop_tasks.pop(name, None)
+        self._log_task_exception(task, f"定時任務 {name}")
 
     def register_startup_task(
         self,
@@ -221,8 +239,24 @@ class TaskManager:
     def _on_daily_task_done(self, name: str, task: asyncio.Task) -> None:
         """每日任務結束時的回呼。"""
         self.background_tasks.discard(task)
-        self._daily_tasks.pop(name, None)
-        self._last_run_dates.pop(name, None)
+        if self._daily_tasks.get(name) is task:
+            self._daily_tasks.pop(name, None)
+            self._last_run_dates.pop(name, None)
+        self._log_task_exception(task, f"每日任務 {name}")
+
+    @staticmethod
+    def _log_task_exception(task: asyncio.Task, label: str) -> None:
+        if task.cancelled():
+            return
+        try:
+            error = task.exception()
+        except asyncio.CancelledError:
+            return
+        if error is not None:
+            logger.error(
+                f"[ImageGen] [TaskManager] {label}執行失敗: {error}",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def cancel_all(self):
         """取消所有正在執行中的任務。"""

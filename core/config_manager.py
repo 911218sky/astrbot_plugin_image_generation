@@ -11,6 +11,7 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
 from .constants import (
+    DEFAULT_MAX_BATCH_COUNT,
     DEFAULT_MAX_IMAGE_SIZE_MB,
     DEFAULT_MAX_RETRY_ATTEMPTS,
 )
@@ -55,6 +56,7 @@ class GenerationSettings:
     default_resolution: str = "1K"
     max_concurrent_tasks: int = 3
     max_queued_tasks: int = 6
+    max_batch_count: int = DEFAULT_MAX_BATCH_COUNT
     show_task_started: bool = False
     show_generation_info: bool = False
     show_model_info: bool = False
@@ -295,6 +297,11 @@ class ConfigManager:
                 6,
                 (0, 100),
             ),
+            max_batch_count=_bounded_int(
+                gen_cfg.get("max_batch_count", DEFAULT_MAX_BATCH_COUNT),
+                DEFAULT_MAX_BATCH_COUNT,
+                (1, 10),
+            ),
             show_task_started=show_task_started,
             show_generation_info=gen_cfg.get("show_generation_info", False),
             show_model_info=gen_cfg.get("show_model_info", False),
@@ -473,6 +480,10 @@ class ConfigManager:
     @property
     def max_queued_tasks(self) -> int:
         return self._plugin_config.generation_settings.max_queued_tasks
+
+    @property
+    def max_batch_count(self) -> int:
+        return self._plugin_config.generation_settings.max_batch_count
 
     @property
     def show_task_started(self) -> bool:

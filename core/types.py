@@ -69,6 +69,7 @@ class GenerationRequest:
     aspect_ratio: str | None = None
     resolution: str | None = None
     task_id: str | None = None
+    count: int = 1
 
 
 @dataclass

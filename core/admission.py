@@ -28,6 +28,7 @@ class AdmissionTicket:
     date_bucket: str
     quota_enabled: bool
     daily_limit: int
+    units: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +44,7 @@ class AdmissionSnapshot:
 
 
 class _TicketState:
-    __slots__ = ("committed", "event", "phase", "ticket")
+    __slots__ = ("committed", "committed_units", "event", "phase", "ticket")
 
     def __init__(
         self,
@@ -55,6 +56,7 @@ class _TicketState:
         self.phase: Literal["active", "queued", "released"] = phase
         self.event = event
         self.committed = False
+        self.committed_units = 0
 
 
 class AdmissionController:
@@ -78,10 +80,11 @@ class AdmissionController:
         self._closed = False
 
     async def reserve(
-        self, umo: str, quota_enabled: bool, daily_limit: int
+        self, umo: str, quota_enabled: bool, daily_limit: int, units: int = 1
     ) -> AdmissionTicket | AdmissionDenied:
         date_bucket = self._today().isoformat()
         effective_limit = max(1, daily_limit)
+        effective_units = max(1, units)
         quota_key = (date_bucket, umo)
 
         async with self._lock:
@@ -91,7 +94,7 @@ class AdmissionController:
             if quota_enabled:
                 committed = self._ledger.get_usage_count_for(umo, date_bucket)
                 pending = self._pending.get(quota_key, 0)
-                if committed + pending >= effective_limit:
+                if committed + pending + effective_units > effective_limit:
                     return AdmissionDenied(reason="daily_limit")
 
             if self._active < self._limits.active:
@@ -108,6 +111,7 @@ class AdmissionController:
                 date_bucket=date_bucket,
                 quota_enabled=quota_enabled,
                 daily_limit=effective_limit,
+                units=effective_units,
             )
             state = _TicketState(ticket, phase, anyio.Event())
             self._states[ticket.token] = state
@@ -119,7 +123,9 @@ class AdmissionController:
                 self._queue.append(ticket.token)
 
             if quota_enabled:
-                self._pending[quota_key] = self._pending.get(quota_key, 0) + 1
+                self._pending[quota_key] = (
+                    self._pending.get(quota_key, 0) + effective_units
+                )
             return ticket
 
     async def wait(self, ticket: AdmissionTicket) -> None:
@@ -136,15 +142,19 @@ class AdmissionController:
                 await self.release(ticket)
             raise
 
-    async def commit(self, ticket: AdmissionTicket) -> None:
+    async def commit(self, ticket: AdmissionTicket, units: int | None = None) -> None:
         async with self._lock:
             state = self._states.get(ticket.token)
             if state is None or state.committed or state.phase == "released":
                 return
+            consumed_units = ticket.units if units is None else max(0, units)
+            consumed_units = min(ticket.units, consumed_units)
             state.committed = True
+            state.committed_units = consumed_units
             if ticket.quota_enabled:
                 self._remove_pending(ticket)
-                self._ledger.record_usage_for(ticket.umo, ticket.date_bucket)
+                for _ in range(consumed_units):
+                    self._ledger.record_usage_for(ticket.umo, ticket.date_bucket)
 
     async def release(self, ticket: AdmissionTicket) -> None:
         async with self._lock:
@@ -181,7 +191,7 @@ class AdmissionController:
 
     def _remove_pending(self, ticket: AdmissionTicket) -> None:
         key = (ticket.date_bucket, ticket.umo)
-        remaining = self._pending.get(key, 0) - 1
+        remaining = self._pending.get(key, 0) - ticket.units
         if remaining > 0:
             self._pending[key] = remaining
         else:

@@ -85,7 +85,9 @@ class FakeImageProcessor:
     def __init__(self, output_path: Path) -> None:
         self.output_path = output_path
 
-    def save_generated_image(self, _task_id: str, data: bytes) -> str:
+    def save_generated_image(
+        self, _task_id: str, data: bytes, sequence: int = 1
+    ) -> str:
         self.output_path.write_bytes(data)
         return str(self.output_path)
 

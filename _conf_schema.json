@@ -399,6 +399,17 @@
         },
         "default": 6
       },
+      "max_batch_count": {
+        "description": "單次批量生圖上限",
+        "hint": "AI 或命令單次最多請求的圖片數量；每張圖片會獨立請求並受額度限制。",
+        "type": "int",
+        "slider": {
+          "min": 1,
+          "max": 10,
+          "step": 1
+        },
+        "default": 4
+      },
       "default_aspect_ratio": {
         "description": "預設寬高比",
         "hint": "使用命令生圖時預設使用的圖片寬高比。選擇自動時由模型自行決定",

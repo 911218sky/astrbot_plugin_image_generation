@@ -4,6 +4,7 @@ import asyncio
 import re
 from collections.abc import Iterable
 from io import BytesIO
+from typing import Any
 
 from PIL import Image
 
@@ -105,6 +106,16 @@ def validate_resolution(value: str | None) -> str | None:
     if value is None:
         return None
     return value if value in ALLOWED_RESOLUTIONS else None
+
+
+def normalize_batch_count(value: Any, maximum: int) -> int:
+    if isinstance(value, bool):
+        return 1
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return min(maximum, max(1, count))
 
 
 def extract_self_avatar_alias(prompt: str) -> tuple[str, bool]:

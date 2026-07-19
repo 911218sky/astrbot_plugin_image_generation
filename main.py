@@ -30,6 +30,7 @@ from .core.admission import (
     AdmissionLimits,
     AdmissionTicket,
 )
+from .core.base_adapter import BaseImageAdapter
 from .core.generator import ImageGenerator
 from .core.image_metadata_store import ImageMetadataStore
 from .core.image_processor import ImageProcessor
@@ -46,6 +47,7 @@ from .core.usage_manager import UsageManager
 from .core.utils import (
     extract_self_avatar_alias,
     mask_sensitive,
+    normalize_batch_count,
     validate_aspect_ratio,
     validate_resolution,
 )
@@ -168,6 +170,7 @@ class ImageGenerationPlugin(Star):
 
         # 初始化生成器
         self.generator: ImageGenerator | None = None
+        self._jimeng_task_adapter: BaseImageAdapter | None = None
         self._active_generation_tasks: dict[str, dict[str, Any]] = {}
         self._recent_generation_tasks: list[dict[str, Any]] = []
         self.page_api = None
@@ -179,7 +182,10 @@ class ImageGenerationPlugin(Star):
     async def initialize(self):
         """插件載入時呼叫"""
         if self.config_manager.adapter_config:
-            self.generator = ImageGenerator(self.config_manager.adapter_config)
+            self.generator = ImageGenerator(
+                self.config_manager.adapter_config,
+                batch_parallelism=self.config_manager.max_concurrent_tasks,
+            )
         else:
             logger.error("[ImageGen] 適配器配置載入失敗，插件未初始化")
 
@@ -205,10 +211,13 @@ class ImageGenerationPlugin(Star):
         """插件解除安裝時呼叫"""
         try:
             await self.admission_controller.close()
+            await self.task_manager.cancel_all()
             await self.reference_collector.close()
             if self.generator:
                 await self.generator.close()
-            await self.task_manager.cancel_all()
+            if self._jimeng_task_adapter:
+                await self._jimeng_task_adapter.close()
+                self._jimeng_task_adapter = None
             await self._refresh_platform_commands()
             logger.info("[ImageGen] 插件已解除安裝")
         except Exception as exc:
@@ -250,6 +259,7 @@ class ImageGenerationPlugin(Star):
 
         # 建立專門用於任務的即夢適配器例項
         jimeng_adapter = Jimeng2APIAdapter(jimeng_config)
+        self._jimeng_task_adapter = jimeng_adapter
 
         # 1. 註冊為啟動任務，插件啟動時執行一次
         self.task_manager.register_startup_task(
@@ -278,13 +288,14 @@ class ImageGenerationPlugin(Star):
         return self.task_manager.create_task(coro)
 
     async def reserve_generation(
-        self, unified_msg_origin: str
+        self, unified_msg_origin: str, count: int = 1
     ) -> AdmissionTicket | AdmissionDenied:
         settings = self.config_manager.usage_settings
         return await self.admission_controller.reserve(
             unified_msg_origin,
             settings.enable_daily_limit,
             settings.daily_limit_count,
+            units=count,
         )
 
     def generation_admission_error(self, denied: AdmissionDenied) -> str:
@@ -465,6 +476,7 @@ class ImageGenerationPlugin(Star):
         prompt: str,
         unified_msg_origin: str,
         admission_ticket: AdmissionTicket,
+        batch_count: int = 1,
         images_data: list[tuple[bytes, str]] | None = None,
         aspect_ratio: str = "1:1",
         resolution: str = "1K",
@@ -487,6 +499,7 @@ class ImageGenerationPlugin(Star):
             "aspect_ratio": aspect_ratio,
             "resolution": resolution,
             "reference_count": len(images_data or []),
+            "batch_count": batch_count,
         }
         try:
             await self.admission_controller.wait(admission_ticket)
@@ -533,6 +546,7 @@ class ImageGenerationPlugin(Star):
                 final_res,
                 task_id,
                 admission_ticket,
+                batch_count,
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(
@@ -563,6 +577,7 @@ class ImageGenerationPlugin(Star):
         resolution: str | None,
         task_id: str,
         admission_ticket: AdmissionTicket,
+        batch_count: int = 1,
     ) -> None:
         """執行生成邏輯併傳送結果。"""
         start_time = time.time()
@@ -576,12 +591,13 @@ class ImageGenerationPlugin(Star):
                 aspect_ratio=aspect_ratio,
                 resolution=resolution,
                 task_id=task_id,
+                count=batch_count,
             )
         )
         end_time = time.time()
         duration = end_time - start_time
 
-        if result.error:
+        if result.error and not result.images:
             logger.error(
                 f"[ImageGen] 任務 {task_id} 生成失敗，耗時: {duration:.2f}s, 錯誤: {result.error}"
             )
@@ -594,6 +610,12 @@ class ImageGenerationPlugin(Star):
                 duration=duration,
             )
             return
+
+        partial_error = result.error
+        if partial_error:
+            logger.warning(
+                f"[ImageGen] 任務 {task_id} 批量部分失敗，仍發布成功圖片: {partial_error}"
+            )
 
         logger.info(
             f"[ImageGen] 任務 {task_id} 生成成功，耗時: {duration:.2f}s, 圖片數量: {len(result.images) if result.images else 0}"
@@ -614,8 +636,10 @@ class ImageGenerationPlugin(Star):
             return
 
         generated_file_paths: list[str] = []
-        for img_bytes in result.images:
-            file_path = self.image_processor.save_generated_image(task_id, img_bytes)
+        for index, img_bytes in enumerate(result.images, 1):
+            file_path = self.image_processor.save_generated_image(
+                task_id, img_bytes, sequence=index
+            )
             if file_path:
                 generated_file_paths.append(file_path)
 
@@ -652,7 +676,9 @@ class ImageGenerationPlugin(Star):
             return
 
         # 記錄使用次數
-        await self.admission_controller.commit(admission_ticket)
+        await self.admission_controller.commit(
+            admission_ticket, units=len(generated_file_paths)
+        )
         self._remember_generated_image_metadata(
             generated_file_paths,
             task_id=task_id,
@@ -669,6 +695,8 @@ class ImageGenerationPlugin(Star):
             chain.file_image(file_path)
 
         info_parts = []
+        if partial_error:
+            info_parts.append(f"批量提醒：{partial_error}")
         if self.config_manager.show_generation_info:
             info_parts.append(
                 f"完成。\n耗時：{duration:.2f}s\n圖片數量：{len(generated_file_paths)}"
@@ -794,8 +822,40 @@ class ImageGenerationPlugin(Star):
         masked_uid = mask_sensitive(user_id)
 
         prompt = self._get_img_subcommand_payload(event)
+        batch_count = 1
+        prompt_parts = prompt.split(maxsplit=2)
+        if prompt_parts and prompt_parts[0] in {"--count", "-n"}:
+            if len(prompt_parts) < 3:
+                yield event.plain_result("❌ 批量參數格式：/img gen --count 3 <提示詞>")
+                return
+            try:
+                raw_count = int(prompt_parts[1])
+            except ValueError:
+                yield event.plain_result("❌ 批量數量必須是整數。")
+                return
+            if raw_count < 1:
+                yield event.plain_result("❌ 批量數量至少為 1。")
+                return
+            batch_count = normalize_batch_count(
+                raw_count, self.config_manager.max_batch_count
+            )
+            prompt = prompt_parts[2]
+        elif prompt_parts and prompt_parts[0].startswith("--count="):
+            try:
+                raw_count = int(prompt_parts[0].split("=", 1)[1])
+            except ValueError:
+                yield event.plain_result("❌ 批量數量必須是整數。")
+                return
+            if raw_count < 1 or len(prompt_parts) < 2:
+                yield event.plain_result("❌ 批量參數格式：/img gen --count=3 <提示詞>")
+                return
+            batch_count = normalize_batch_count(
+                raw_count, self.config_manager.max_batch_count
+            )
+            prompt = " ".join(prompt_parts[1:])
         logger.info(
-            f"[ImageGen] 收到 img gen 指令 - 使用者：{masked_uid}，提示詞：{prompt}"
+            f"[ImageGen] 收到 img gen 指令 - 使用者：{masked_uid}，"
+            f"批量：{batch_count}，提示詞：{prompt}"
         )
 
         aspect_ratio = self.config_manager.default_aspect_ratio
@@ -847,7 +907,9 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result("❌ 請提供提示詞或預設名稱。")
             return
 
-        admission = await self.reserve_generation(event.unified_msg_origin)
+        admission = await self.reserve_generation(
+            event.unified_msg_origin, batch_count
+        )
         if isinstance(admission, AdmissionDenied):
             yield event.plain_result(self.generation_admission_error(admission))
             return
@@ -874,6 +936,8 @@ class ImageGenerationPlugin(Star):
 
             if self.config_manager.show_task_started:
                 msg = "已啟動生圖任務"
+                if batch_count > 1:
+                    msg += f" ×{batch_count}"
                 if images_data:
                     msg += f" [參考圖 {len(images_data)} 張]"
                 if matched_preset:
@@ -889,6 +953,7 @@ class ImageGenerationPlugin(Star):
                     aspect_ratio=aspect_ratio,
                     resolution=resolution,
                     task_id=task_id,
+                    batch_count=batch_count,
                     admission_ticket=admission_ticket,
                 )
             )

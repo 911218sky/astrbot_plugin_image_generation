@@ -49,6 +49,7 @@ def test_baseline_config_manager_imports_and_preserves_active_concurrency() -> N
     manager = ConfigManager(config)
 
     assert manager.max_concurrent_tasks == 3
+    assert manager.max_batch_count == 4
     assert manager.usage_settings.max_image_size_mb == 10
     assert manager.show_generation_info is False
     assert config.save_calls == 0
@@ -184,6 +185,9 @@ def test_schema_defaults_and_ranges_match_runtime_contract() -> None:
     assert queue["slider"] == {"min": 0, "max": 100, "step": 1}, (
         "IMG-101 RED: schema queue range must be zero through one hundred"
     )
+    batch = generation.get("max_batch_count")
+    assert batch is not None and batch["default"] == 4
+    assert batch["slider"] == {"min": 1, "max": 10, "step": 1}
     assert generation["max_retry_attempts"]["slider"]["max"] == 5, (
         "IMG-101 RED: schema retry maximum must match runtime maximum five"
     )
