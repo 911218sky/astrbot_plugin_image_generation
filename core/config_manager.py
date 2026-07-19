@@ -10,8 +10,21 @@ from typing import Any
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
-from .constants import DEFAULT_MAX_RETRY_ATTEMPTS
+from .constants import (
+    DEFAULT_MAX_IMAGE_SIZE_MB,
+    DEFAULT_MAX_RETRY_ATTEMPTS,
+)
 from .types import AdapterConfig, AdapterType
+
+type JsonValue = (
+    None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+)
+
+
+def _bounded_int(value: JsonValue, default: int, limits: tuple[int, int]) -> int:
+    if type(value) is not int:
+        return default
+    return min(limits[1], max(limits[0], value))
 
 
 @dataclass
@@ -23,7 +36,7 @@ class UsageSettings:
     daily_limit_count: int = 10
     max_image_size_mb: int = 10
     umo_blacklist: list[str] = field(default_factory=list)
-    blacklist_block_message: str = "❌ 當前會話已被加入黑名單，無法使用生圖功能"
+    blacklist_block_message: str = "❌ 當前會話未啟用生圖功能"
 
 
 @dataclass
@@ -41,6 +54,7 @@ class GenerationSettings:
     default_aspect_ratio: str = "自動"
     default_resolution: str = "1K"
     max_concurrent_tasks: int = 3
+    max_queued_tasks: int = 6
     show_task_started: bool = False
     show_generation_info: bool = False
     show_model_info: bool = False
@@ -114,12 +128,21 @@ class ConfigManager:
         api_providers_raw = self._config.get("api_providers", [])
 
         self._plugin_config.enable_llm_tool = self._config.get("enable_llm_tool", True)
-        max_retry_attempts = gen_cfg.get(
-            "max_retry_attempts", DEFAULT_MAX_RETRY_ATTEMPTS
+        max_retry_attempts = _bounded_int(
+            gen_cfg.get("max_retry_attempts", DEFAULT_MAX_RETRY_ATTEMPTS),
+            DEFAULT_MAX_RETRY_ATTEMPTS,
+            (1, 5),
         )
-        if not isinstance(max_retry_attempts, int):
-            max_retry_attempts = DEFAULT_MAX_RETRY_ATTEMPTS
-        max_retry_attempts = min(5, max(1, max_retry_attempts))
+
+        provider_name_counts: dict[str, int] = {}
+        for provider_item in api_providers_raw:
+            if not isinstance(provider_item, dict):
+                continue
+            raw_name = provider_item.get("name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                continue
+            name = raw_name.strip()
+            provider_name_counts[name] = provider_name_counts.get(name, 0) + 1
 
         # 1. 收集所有供應商配置
         all_provider_configs: list[AdapterConfig] = []
@@ -137,7 +160,12 @@ class ConfigManager:
                 logger.warning(f"[ImageGen] 忽略未知適配器型別: {adapter_type_str}")
                 continue
 
-            name = provider_item.get("name", "")
+            raw_name = provider_item.get("name")
+            if not isinstance(raw_name, str):
+                continue
+            name = raw_name.strip()
+            if not name or provider_name_counts.get(name) != 1:
+                continue
             base_url = (provider_item.get("base_url") or "").strip()
             api_keys = [k for k in provider_item.get("api_keys", []) if k]
             available_models = provider_item.get("available_models") or []
@@ -181,17 +209,17 @@ class ConfigManager:
         current_model = ""
 
         if "/" in model_setting:
-            try:
-                target_provider_name, target_model = model_setting.split("/", 1)
-                for cfg in all_provider_configs:
-                    if cfg.name == target_provider_name:
-                        matched_config = cfg
-                        current_model = target_model
-                        break
-            except ValueError:
-                logger.warning(
-                    f"[ImageGen] 模型設定格式錯誤: {model_setting}，期望格式為 '供應商/模型'"
-                )
+            target_provider_name, target_model = (
+                part.strip() for part in model_setting.split("/", 1)
+            )
+            for cfg in all_provider_configs:
+                if (
+                    cfg.name == target_provider_name
+                    and target_model in cfg.available_models
+                ):
+                    matched_config = cfg
+                    current_model = target_model
+                    break
 
         # 如果沒匹配到（或者沒設定），取第一個可用的
         if not matched_config and all_provider_configs:
@@ -225,15 +253,21 @@ class ConfigManager:
             umo_blacklist = [
                 str(umo).strip() for umo in umo_blacklist_raw if str(umo).strip()
             ]
-        blacklist_block_message = str(
-            user_limits_cfg.get(
-                "blacklist_block_message", UsageSettings.blacklist_block_message
-            )
-        ).strip()
+        blacklist_block_message = user_limits_cfg.get(
+            "blacklist_block_message", UsageSettings.blacklist_block_message
+        )
+        if not isinstance(blacklist_block_message, str):
+            blacklist_block_message = UsageSettings.blacklist_block_message
+        blacklist_block_message = blacklist_block_message.strip()
+        max_image_size_mb = _bounded_int(
+            user_limits_cfg.get("max_image_size_mb", DEFAULT_MAX_IMAGE_SIZE_MB),
+            DEFAULT_MAX_IMAGE_SIZE_MB,
+            (1, 30),
+        )
 
         self._plugin_config.usage_settings = UsageSettings(
             rate_limit_seconds=max(0, user_limits_cfg.get("rate_limit_seconds", 0)),
-            max_image_size_mb=max(1, user_limits_cfg.get("max_image_size_mb", 10)),
+            max_image_size_mb=max_image_size_mb,
             enable_daily_limit=user_limits_cfg.get("enable_daily_limit", False),
             daily_limit_count=max(1, user_limits_cfg.get("daily_limit_count", 10)),
             umo_blacklist=umo_blacklist,
@@ -247,14 +281,20 @@ class ConfigManager:
         )
 
         # 生成設定
-        show_task_started = gen_cfg.get("show_task_started", False)
-        if not isinstance(show_task_started, bool):
-            show_task_started = False
+        raw_show_task_started = gen_cfg.get("show_task_started", False)
+        show_task_started = (
+            raw_show_task_started if isinstance(raw_show_task_started, bool) else False
+        )
 
         self._plugin_config.generation_settings = GenerationSettings(
             default_aspect_ratio=gen_cfg.get("default_aspect_ratio", "自動"),
             default_resolution=gen_cfg.get("default_resolution", "1K"),
             max_concurrent_tasks=max(1, gen_cfg.get("max_concurrent_tasks", 3)),
+            max_queued_tasks=_bounded_int(
+                gen_cfg.get("max_queued_tasks", 6),
+                6,
+                (0, 100),
+            ),
             show_task_started=show_task_started,
             show_generation_info=gen_cfg.get("show_generation_info", False),
             show_model_info=gen_cfg.get("show_model_info", False),
@@ -431,13 +471,17 @@ class ConfigManager:
         return self._plugin_config.generation_settings.max_concurrent_tasks
 
     @property
-    def show_generation_info(self) -> bool:
-        """是否顯示生成資訊。"""
-        return self._plugin_config.generation_settings.show_generation_info
+    def max_queued_tasks(self) -> int:
+        return self._plugin_config.generation_settings.max_queued_tasks
 
     @property
     def show_task_started(self) -> bool:
         return self._plugin_config.generation_settings.show_task_started
+
+    @property
+    def show_generation_info(self) -> bool:
+        """是否顯示生成資訊。"""
+        return self._plugin_config.generation_settings.show_generation_info
 
     @property
     def show_model_info(self) -> bool:

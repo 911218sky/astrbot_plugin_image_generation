@@ -6,11 +6,14 @@ AstrBot 圖像生成插件主模組
 from __future__ import annotations
 
 import asyncio
+import datetime
 import hashlib
 import json
 import time
 from collections.abc import Coroutine
-from typing import Any
+from typing import Any, assert_never
+
+import anyio
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
@@ -21,10 +24,21 @@ from astrbot.core.star.filter.custom_filter import CustomFilter
 from astrbot.core.star.star_tools import StarTools
 
 from .core.config_manager import ConfigManager
+from .core.admission import (
+    AdmissionController,
+    AdmissionDenied,
+    AdmissionLimits,
+    AdmissionTicket,
+)
 from .core.generator import ImageGenerator
 from .core.image_metadata_store import ImageMetadataStore
 from .core.image_processor import ImageProcessor
 from .core.llm_tool import ImageGenerationTool, adjust_tool_parameters
+from .core.reference_collector import (
+    CollectedReferences,
+    ReferenceCollector,
+    ReferenceRejected,
+)
 from .core.safety_auditor import SafetyAuditor
 from .core.task_manager import TaskManager
 from .core.types import GenerationRequest, ImageCapability, ImageData
@@ -112,12 +126,32 @@ class ImageGenerationPlugin(Star):
         self.usage_manager = UsageManager(
             str(self.data_dir), self.config_manager.usage_settings
         )
+        self.admission_controller = AdmissionController(
+            AdmissionLimits(
+                active=self.config_manager.max_concurrent_tasks,
+                queued=self.config_manager.max_queued_tasks,
+            ),
+            self.usage_manager,
+            datetime.date.today,
+        )
 
         # 初始化圖片處理器
         self.image_processor = ImageProcessor(
             str(self.cache_dir),
             self.config_manager.usage_settings.max_image_size_mb,
             self.config_manager.cache_settings.max_cache_count,
+        )
+        astrbot_data_dir = next(
+            (parent for parent in self.data_dir.parents if parent.name == "data"),
+            self.data_dir,
+        )
+        self.reference_collector = ReferenceCollector(
+            self.config_manager.usage_settings.max_image_size_mb,
+            approved_local_roots=(
+                self.data_dir,
+                astrbot_data_dir / "temp",
+                astrbot_data_dir / "attachments",
+            ),
         )
         self.image_metadata_store = ImageMetadataStore(
             self.data_dir / "image_metadata.json",
@@ -134,7 +168,6 @@ class ImageGenerationPlugin(Star):
 
         # 初始化生成器
         self.generator: ImageGenerator | None = None
-        self.semaphore: asyncio.Semaphore | None = None
         self._active_generation_tasks: dict[str, dict[str, Any]] = {}
         self._recent_generation_tasks: list[dict[str, Any]] = []
         self.page_api = None
@@ -147,7 +180,6 @@ class ImageGenerationPlugin(Star):
         """插件載入時呼叫"""
         if self.config_manager.adapter_config:
             self.generator = ImageGenerator(self.config_manager.adapter_config)
-            self.semaphore = asyncio.Semaphore(self.config_manager.max_concurrent_tasks)
         else:
             logger.error("[ImageGen] 適配器配置載入失敗，插件未初始化")
 
@@ -172,6 +204,8 @@ class ImageGenerationPlugin(Star):
     async def terminate(self):
         """插件解除安裝時呼叫"""
         try:
+            await self.admission_controller.close()
+            await self.reference_collector.close()
             if self.generator:
                 await self.generator.close()
             await self.task_manager.cancel_all()
@@ -242,6 +276,59 @@ class ImageGenerationPlugin(Star):
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
         """建立後臺任務並新增到管理器中。"""
         return self.task_manager.create_task(coro)
+
+    async def reserve_generation(
+        self, unified_msg_origin: str
+    ) -> AdmissionTicket | AdmissionDenied:
+        settings = self.config_manager.usage_settings
+        return await self.admission_controller.reserve(
+            unified_msg_origin,
+            settings.enable_daily_limit,
+            settings.daily_limit_count,
+        )
+
+    def generation_admission_error(self, denied: AdmissionDenied) -> str:
+        match denied.reason:
+            case "daily_limit":
+                limit = self.config_manager.usage_settings.daily_limit_count
+                return f"❌ 您今日的生圖額度已用完 ({limit}次)，請明天再試"
+            case "capacity":
+                return "❌ 生圖任務已滿，請稍後再試"
+            case "closed":
+                return "❌ 生圖服務正在關閉，暫時無法生成圖片"
+            case unreachable:
+                assert_never(unreachable)
+
+    async def collect_generation_references(
+        self,
+        event: AstrMessageEvent,
+        avatar_ids: tuple[str, ...] = (),
+    ) -> CollectedReferences | ReferenceRejected:
+        capabilities = (
+            self.generator.adapter.get_capabilities()
+            if self.generator and self.generator.adapter
+            else ImageCapability.NONE
+        )
+        if not capabilities & ImageCapability.IMAGE_TO_IMAGE:
+            return CollectedReferences(images=(), total_bytes=0)
+        sources = self.reference_collector.sources_from_event(event)
+        return await self.reference_collector.collect(
+            self.reference_collector.with_avatar_ids(sources, avatar_ids)
+        )
+
+    @staticmethod
+    def generation_reference_error(rejected: ReferenceRejected) -> str:
+        match rejected.reason:
+            case "too_many":
+                return "❌ 參考圖最多可使用 4 張"
+            case "per_file_too_large":
+                return "❌ 單張參考圖超過大小限制"
+            case "aggregate_too_large":
+                return "❌ 參考圖總大小不可超過 20 MiB"
+            case "invalid_reference":
+                return "❌ 參考圖無效或無法讀取"
+            case unreachable:
+                assert_never(unreachable)
 
     def _register_official_page_api_if_available(self) -> None:
         """註冊 AstrBot 官方插件頁 API；舊版 AstrBot 不支援時自動跳過。"""
@@ -377,40 +464,13 @@ class ImageGenerationPlugin(Star):
         self,
         prompt: str,
         unified_msg_origin: str,
+        admission_ticket: AdmissionTicket,
         images_data: list[tuple[bytes, str]] | None = None,
         aspect_ratio: str = "1:1",
         resolution: str = "1K",
         task_id: str | None = None,
     ) -> None:
         """非同步生成圖片併傳送。"""
-        if not self.generator or not self.generator.adapter:
-            await self.context.send_message(
-                unified_msg_origin,
-                MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
-            )
-            return
-
-        capabilities = self.generator.adapter.get_capabilities()
-
-        # 檢查並清理不支援的引數
-        if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
-            logger.warning(
-                f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"
-            )
-            images_data = None
-
-        if not (capabilities & ImageCapability.ASPECT_RATIO) and aspect_ratio != "自動":
-            logger.info(
-                f"[ImageGen] 當前適配器不支援指定比例，已忽略參數: {aspect_ratio}"
-            )
-            aspect_ratio = "自動"
-
-        if not (capabilities & ImageCapability.RESOLUTION) and resolution != "1K":
-            logger.info(
-                f"[ImageGen] 當前適配器不支援指定解析度，已忽略參數: {resolution}"
-            )
-            resolution = "1K"
-
         if not task_id:
             task_id = hashlib.md5(
                 f"{time.time()}{unified_msg_origin}".encode()
@@ -428,31 +488,52 @@ class ImageGenerationPlugin(Star):
             "resolution": resolution,
             "reference_count": len(images_data or []),
         }
-
-        final_ar = validate_aspect_ratio(aspect_ratio) or None
-        if final_ar == "自動":
-            final_ar = None
-        final_res = validate_resolution(resolution)
-
-        images: list[ImageData] = []
-        if images_data:
-            for data, mime in images_data:
-                images.append(ImageData(data=data, mime_type=mime))
-
-        # 使用訊號量控制併發
         try:
-            if self.semaphore is None:
-                self._mark_generation_task_running(task_id)
-                await self._do_generate_and_send(
-                    prompt, unified_msg_origin, images, final_ar, final_res, task_id
+            await self.admission_controller.wait(admission_ticket)
+            if not self.generator or not self.generator.adapter:
+                await self.context.send_message(
+                    unified_msg_origin,
+                    MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
                 )
                 return
 
-            async with self.semaphore:
-                self._mark_generation_task_running(task_id)
-                await self._do_generate_and_send(
-                    prompt, unified_msg_origin, images, final_ar, final_res, task_id
+            capabilities = self.generator.adapter.get_capabilities()
+            if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
+                logger.warning(
+                    f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"
                 )
+                images_data = None
+            if (
+                not capabilities & ImageCapability.ASPECT_RATIO
+                and aspect_ratio != "自動"
+            ):
+                logger.info(
+                    f"[ImageGen] 當前適配器不支援指定比例，已忽略參數: {aspect_ratio}"
+                )
+                aspect_ratio = "自動"
+            if not capabilities & ImageCapability.RESOLUTION and resolution != "1K":
+                logger.info(
+                    f"[ImageGen] 當前適配器不支援指定解析度，已忽略參數: {resolution}"
+                )
+                resolution = "1K"
+
+            final_ar = validate_aspect_ratio(aspect_ratio) or None
+            if final_ar == "自動":
+                final_ar = None
+            final_res = validate_resolution(resolution)
+            images = [
+                ImageData(data=data, mime_type=mime) for data, mime in images_data or []
+            ]
+            self._mark_generation_task_running(task_id)
+            await self._do_generate_and_send(
+                prompt,
+                unified_msg_origin,
+                images,
+                final_ar,
+                final_res,
+                task_id,
+                admission_ticket,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 f"[ImageGen] 任務 {task_id} 執行過程發生未預期錯誤: {exc}",
@@ -469,6 +550,8 @@ class ImageGenerationPlugin(Star):
                 image_count=0,
             )
         finally:
+            with anyio.CancelScope(shield=True):
+                await self.admission_controller.release(admission_ticket)
             self._active_generation_tasks.pop(task_id, None)
 
     async def _do_generate_and_send(
@@ -479,6 +562,7 @@ class ImageGenerationPlugin(Star):
         aspect_ratio: str | None,
         resolution: str | None,
         task_id: str,
+        admission_ticket: AdmissionTicket,
     ) -> None:
         """執行生成邏輯併傳送結果。"""
         start_time = time.time()
@@ -549,31 +633,17 @@ class ImageGenerationPlugin(Star):
             )
             return
 
-        # 生圖後圖片稽核
-        image_allowed, image_reason = await self.safety_auditor.audit_generated_images(
-            prompt=prompt,
-            image_paths=generated_file_paths,
-            unified_msg_origin=unified_msg_origin,
+        audit_result = await self.safety_auditor.audit_staged_generated_images(
+            prompt, generated_file_paths, unified_msg_origin
         )
+        image_allowed, image_reason, generated_file_paths = audit_result
         if not image_allowed:
             logger.warning(f"[ImageGen] 任務 {task_id} 圖片稽核未透過: {image_reason}")
-            self._remember_generated_image_metadata(
-                generated_file_paths,
-                task_id=task_id,
-                status="blocked",
-                prompt=prompt,
-                unified_msg_origin=unified_msg_origin,
-                images=images,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-            )
             self._remember_generation_task(
                 task_id,
                 "blocked",
                 error=image_reason,
-                image_count=len(generated_file_paths),
-                files=self._file_names(generated_file_paths),
-                duration=duration,
+                image_count=0,
             )
             await self.context.send_message(
                 unified_msg_origin,
@@ -582,7 +652,7 @@ class ImageGenerationPlugin(Star):
             return
 
         # 記錄使用次數
-        self.usage_manager.record_usage(unified_msg_origin)
+        await self.admission_controller.commit(admission_ticket)
         self._remember_generated_image_metadata(
             generated_file_paths,
             task_id=task_id,
@@ -777,55 +847,56 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result("❌ 請提供提示詞或預設名稱。")
             return
 
-        prompt_allowed, prompt_reason = await self.safety_auditor.audit_prompt(
-            prompt, event.unified_msg_origin
-        )
-        if not prompt_allowed:
-            yield event.plain_result(f"❌ 提示詞未通過審核：{prompt_reason}")
+        admission = await self.reserve_generation(event.unified_msg_origin)
+        if isinstance(admission, AdmissionDenied):
+            yield event.plain_result(self.generation_admission_error(admission))
             return
 
-        # 取得參考圖
-        images_data = None
-        if (
-            self.generator
-            and self.generator.adapter
-            and (
-                self.generator.adapter.get_capabilities()
-                & ImageCapability.IMAGE_TO_IMAGE
+        admission_ticket: AdmissionTicket | None = admission
+        try:
+            prompt_allowed, prompt_reason = await self.safety_auditor.audit_prompt(
+                prompt, event.unified_msg_origin
             )
-        ):
-            images_data = await self.image_processor.fetch_images_from_event(event)
+            if not prompt_allowed:
+                yield event.plain_result(f"❌ 提示詞未通過審核：{prompt_reason}")
+                return
+
+            avatar_ids: tuple[str, ...] = ()
             if use_self_avatar:
                 self_id = str(event.get_self_id()).strip()
                 if self_id:
-                    avatar_data = await self.image_processor.get_avatar(self_id)
-                    if avatar_data:
-                        images_data.append((avatar_data, "image/jpeg"))
-                    else:
-                        logger.warning(
-                            "[ImageGen] @self alias was used, but the bot avatar could not be loaded"
-                        )
+                    avatar_ids = (self_id,)
+            references = await self.collect_generation_references(event, avatar_ids)
+            if isinstance(references, ReferenceRejected):
+                yield event.plain_result(self.generation_reference_error(references))
+                return
+            images_data = list(references.images)
 
-        if self.config_manager.show_task_started:
-            msg = "已啟動生圖任務"
-            if images_data:
-                msg += f" [參考圖 {len(images_data)} 張]"
-            if matched_preset:
-                msg += f" [預設：{matched_preset}]"
-            yield event.plain_result(msg)
+            if self.config_manager.show_task_started:
+                msg = "已啟動生圖任務"
+                if images_data:
+                    msg += f" [參考圖 {len(images_data)} 張]"
+                if matched_preset:
+                    msg += f" [預設：{matched_preset}]"
+                yield event.plain_result(msg)
 
-        task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
-
-        self.create_background_task(
-            self._generate_and_send_image_async(
-                prompt=prompt,
-                images_data=images_data or None,
-                unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-                task_id=task_id,
+            task_id = hashlib.md5(f"{time.time()}{user_id}".encode()).hexdigest()[:8]
+            self.create_background_task(
+                self._generate_and_send_image_async(
+                    prompt=prompt,
+                    images_data=images_data or None,
+                    unified_msg_origin=event.unified_msg_origin,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                    task_id=task_id,
+                    admission_ticket=admission_ticket,
+                )
             )
-        )
+            admission_ticket = None
+        finally:
+            if admission_ticket is not None:
+                with anyio.CancelScope(shield=True):
+                    await self.admission_controller.release(admission_ticket)
 
     @img.command("tasks", desc="查看進行中的生圖任務")
     async def image_tasks_command(self, event: AstrMessageEvent):

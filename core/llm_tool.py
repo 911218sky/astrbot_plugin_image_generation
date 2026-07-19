@@ -8,6 +8,7 @@ import hashlib
 import time
 from typing import TYPE_CHECKING, Any
 
+import anyio
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 
@@ -17,6 +18,8 @@ from astrbot.core.agent.run_context import ContextWrapper
 from astrbot.core.agent.tool import FunctionTool, ToolExecResult
 from astrbot.core.astr_agent_context import AstrAgentContext
 
+from .admission import AdmissionDenied
+from .reference_collector import ReferenceRejected
 from .types import ImageCapability
 from .utils import extract_self_avatar_alias
 
@@ -33,33 +36,14 @@ def _normalize_avatar_references(value: Any) -> list[str]:
         return []
 
     refs: list[str] = []
-    seen: set[str] = set()
     for item in value:
         if not isinstance(item, str):
             continue
         ref = item.strip().lower()
-        if not ref or ref in seen:
+        if not ref:
             continue
         refs.append(ref)
-        seen.add(ref)
     return refs
-
-
-def _dedupe_images_data(
-    images_data: list[tuple[bytes, str]],
-) -> list[tuple[bytes, str]]:
-    deduped: list[tuple[bytes, str]] = []
-    seen: set[tuple[str, str]] = set()
-
-    for data, mime in images_data:
-        digest = hashlib.sha256(data).hexdigest()
-        key = (digest, mime)
-        if key in seen:
-            continue
-        deduped.append((data, mime))
-        seen.add(key)
-
-    return deduped
 
 
 def _resolve_aspect_ratio(
@@ -340,101 +324,90 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
             )
             return "❌ 未配置 API Key，無法生成圖片"
 
-        prompt_allowed, prompt_reason = await plugin.safety_auditor.audit_prompt(
-            prompt, event.unified_msg_origin
-        )
-        if not prompt_allowed:
-            return f"❌ 提示詞審核未通過：{prompt_reason}"
+        admission = await plugin.reserve_generation(event.unified_msg_origin)
+        if isinstance(admission, AdmissionDenied):
+            return plugin.generation_admission_error(admission)
 
-        # 工具呼叫同樣支援取得上下文參考圖（訊息/引用/頭像）
-        images_data = []
-        capabilities = (
-            plugin.generator.adapter.get_capabilities()
-            if plugin.generator and plugin.generator.adapter
-            else ImageCapability.NONE
-        )
-
+        admission_ticket = admission
         try:
-            if capabilities & ImageCapability.IMAGE_TO_IMAGE:
-                images_data = await plugin.image_processor.fetch_images_from_event(
-                    event
-                )
-
-                # 處理頭像引用引數
-                avatar_refs = _normalize_avatar_references(
-                    kwargs.get("avatar_references", [])
-                )
-                if use_self_avatar and "self" not in avatar_refs:
-                    avatar_refs.append("self")
-                if avatar_refs:
-                    for ref in avatar_refs:
-                        user_id = None
-                        if ref == "self":
-                            user_id = str(event.get_self_id())
-                        elif ref == "sender":
-                            user_id = str(
-                                event.get_sender_id() or event.unified_msg_origin
-                            )
-                        else:
-                            # 簡單的 QQ 號校驗（可選）
-                            if ref.isdigit():
-                                user_id = ref
-
-                        if user_id:
-                            avatar_data = await plugin.image_processor.get_avatar(
-                                user_id
-                            )
-                            if avatar_data:
-                                images_data.append((avatar_data, "image/jpeg"))
-                                logger.info(
-                                    f"[ImageGen] 已新增 {user_id} 的頭像作為參考圖"
-                                )
-                images_data = _dedupe_images_data(images_data)
-        except Exception as e:
-            logger.error(f"[ImageGen] 處理參考圖失敗: {e}", exc_info=True)
-            # 參考圖處理失敗不影響文生圖流程，記錄日誌繼續執行
-
-        # 生成任務 ID
-        task_id = hashlib.md5(
-            f"{time.time()}{event.unified_msg_origin}".encode()
-        ).hexdigest()[:8]
-
-        aspect_ratio = _resolve_aspect_ratio(
-            prompt,
-            kwargs.get("aspect_ratio"),
-            plugin.config_manager.default_aspect_ratio,
-        )
-        resolution = _resolve_resolution(
-            prompt,
-            kwargs.get("resolution"),
-            plugin.config_manager.default_resolution,
-        )
-        logger.info(
-            f"[ImageGen] 工具呼叫解析參數: aspect_ratio={aspect_ratio}, resolution={resolution}"
-        )
-
-        # 建立後臺任務進行生圖
-        plugin.create_background_task(
-            plugin._generate_and_send_image_async(
-                prompt=prompt,
-                images_data=images_data or None,
-                unified_msg_origin=event.unified_msg_origin,
-                aspect_ratio=aspect_ratio or plugin.config_manager.default_aspect_ratio,
-                resolution=resolution or plugin.config_manager.default_resolution,
-                task_id=task_id,
+            prompt_allowed, prompt_reason = await plugin.safety_auditor.audit_prompt(
+                prompt, event.unified_msg_origin
             )
-        )
+            if not prompt_allowed:
+                return f"❌ 提示詞審核未通過：{prompt_reason}"
 
-        mode = "圖生圖" if images_data else "文生圖"
-        ref_info = f" [參考圖 {len(images_data)} 張]" if images_data else ""
-        notice = f"✅ 已啟動{mode}任務{ref_info}（任務 ID：{task_id}）"
-        if plugin.config_manager.show_task_started:
-            await plugin.context.send_message(
-                event.unified_msg_origin,
-                MessageChain().message(notice),
+            avatar_refs = _normalize_avatar_references(
+                kwargs.get("avatar_references", [])
             )
-            return notice
-        return f"已建立{mode}任務，背景生成中。"
+            if use_self_avatar:
+                avatar_refs.append("self")
+            avatar_ids: list[str] = []
+            for ref in avatar_refs:
+                if ref == "self":
+                    user_id = str(event.get_self_id()).strip()
+                elif ref == "sender":
+                    user_id = str(
+                        event.get_sender_id() or event.unified_msg_origin
+                    ).strip()
+                elif ref.isdigit():
+                    user_id = ref
+                else:
+                    user_id = ""
+                if user_id:
+                    avatar_ids.append(user_id)
+
+            references = await plugin.collect_generation_references(
+                event, tuple(avatar_ids)
+            )
+            if isinstance(references, ReferenceRejected):
+                return plugin.generation_reference_error(references)
+            images_data = list(references.images)
+
+            task_id = hashlib.md5(
+                f"{time.time()}{event.unified_msg_origin}".encode()
+            ).hexdigest()[:8]
+            aspect_ratio = _resolve_aspect_ratio(
+                prompt,
+                kwargs.get("aspect_ratio"),
+                plugin.config_manager.default_aspect_ratio,
+            )
+            resolution = _resolve_resolution(
+                prompt,
+                kwargs.get("resolution"),
+                plugin.config_manager.default_resolution,
+            )
+            logger.info(
+                f"[ImageGen] 工具呼叫解析參數: aspect_ratio={aspect_ratio}, resolution={resolution}"
+            )
+
+            plugin.create_background_task(
+                plugin._generate_and_send_image_async(
+                    prompt=prompt,
+                    images_data=images_data or None,
+                    unified_msg_origin=event.unified_msg_origin,
+                    aspect_ratio=aspect_ratio
+                    or plugin.config_manager.default_aspect_ratio,
+                    resolution=resolution or plugin.config_manager.default_resolution,
+                    task_id=task_id,
+                    admission_ticket=admission_ticket,
+                )
+            )
+            admission_ticket = None
+
+            mode = "圖生圖" if images_data else "文生圖"
+            ref_info = f" [參考圖 {len(images_data)} 張]" if images_data else ""
+            notice = f"✅ 已啟動{mode}任務{ref_info}（任務 ID：{task_id}）"
+            if plugin.config_manager.show_task_started:
+                await plugin.context.send_message(
+                    event.unified_msg_origin,
+                    MessageChain().message(notice),
+                )
+                return notice
+            return f"已建立{mode}任務，背景生成中。"
+        finally:
+            if admission_ticket is not None:
+                with anyio.CancelScope(shield=True):
+                    await plugin.admission_controller.release(admission_ticket)
 
 
 def adjust_tool_parameters(

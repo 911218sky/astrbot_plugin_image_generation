@@ -1,12 +1,15 @@
-"""
-圖片處理模組 - 下載、提取、快取管理
-"""
-
 from __future__ import annotations
 
 import hashlib
 import os
-from typing import TYPE_CHECKING
+import re
+import stat
+import threading
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+from uuid import uuid4
 
 import astrbot.api.message_components as Comp
 from astrbot.api import logger
@@ -15,24 +18,138 @@ from astrbot.core.utils.io import download_image_by_url
 if TYPE_CHECKING:
     from astrbot.api.event import AstrMessageEvent
 
+_GENERATED_IMAGE_SUFFIXES: Final = frozenset({".png", ".jpg", ".jpeg", ".webp", ".gif"})
+_RESIDUE_NAME: Final = re.compile(
+    r"^\.(?P<public>gen_[^/\\]+)\.(?P<nonce>[0-9a-f]{32})"
+    r"\.imagegen-(?:pending|blocked)$"
+)
+
+
+class BlockedFileCleanupError(OSError):
+    def __init__(self, failures: list[OSError]) -> None:
+        self.failures = tuple(failures)
+        super().__init__("; ".join(str(failure) for failure in failures))
+
+
+@dataclass(frozen=True, slots=True)
+class StagedGeneratedFile:
+    public_path: Path
+    audit_path: Path
+    device: int
+    inode: int
+
+
+_PUBLICATIONS: Final[Counter[Path]] = Counter()
+_PUBLICATION_LOCK: Final = threading.Lock()
+
+
+def begin_generated_file_publication(paths: list[Path]) -> None:
+    with _PUBLICATION_LOCK:
+        _PUBLICATIONS.update(Path(os.path.abspath(path)) for path in paths)
+
+
+def end_generated_file_publication(paths: list[Path]) -> None:
+    with _PUBLICATION_LOCK:
+        _PUBLICATIONS.subtract(Path(os.path.abspath(path)) for path in paths)
+        _PUBLICATIONS.__iadd__(Counter())
+
+
+def is_generated_file_publication_hidden(path: Path) -> bool:
+    try:
+        info = path.lstat()
+    except OSError:
+        return True
+    with _PUBLICATION_LOCK:
+        registered = Path(os.path.abspath(path)) in _PUBLICATIONS
+    return not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or registered
+
+
+def make_private_generated_path(path: Path, state: str) -> Path:
+    return path.with_name(f".{path.name}.{uuid4().hex}.imagegen-{state}")
+
+
+def delete_blocked_generated_files(file_paths: list[str]) -> None:
+    failures: list[OSError] = []
+    for file_path in file_paths:
+        path = Path(file_path)
+        try:
+            path.unlink(missing_ok=True)
+            continue
+        except FileNotFoundError:
+            continue
+        except OSError:
+            tombstone = make_private_generated_path(path, "blocked")
+        try:
+            os.replace(path, tombstone)
+        except FileNotFoundError:
+            continue
+        except OSError as cleanup_error:
+            failures.append(cleanup_error)
+            continue
+        try:
+            tombstone.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            failures.append(cleanup_error)
+    if failures:
+        raise BlockedFileCleanupError(failures)
+
+
+def owns_staged_path(path: Path, item: StagedGeneratedFile) -> bool:
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    return stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == (
+        item.device,
+        item.inode,
+    )
+
+
+def cleanup_staged_files(staged_files: list[StagedGeneratedFile]) -> None:
+    failures: list[OSError] = []
+    for item in staged_files:
+        for path in (item.public_path, item.audit_path):
+            if not owns_staged_path(path, item):
+                continue
+            try:
+                delete_blocked_generated_files([str(path)])
+            except BlockedFileCleanupError as error:
+                failures.extend(error.failures)
+    if failures:
+        raise BlockedFileCleanupError(failures)
+
 
 class ImageProcessor:
-    """圖片處理器 - 負責圖片下載、提取和快取管理。"""
-
     def __init__(self, cache_dir: str, max_image_size_mb: int, max_cache_count: int):
         self._cache_dir = cache_dir
         self._max_image_size_mb = max_image_size_mb
         self._max_cache_count = max_cache_count
-        self._ensure_cache_dir()
-
-    def _ensure_cache_dir(self) -> None:
-        """確保快取目錄存在。"""
         os.makedirs(self._cache_dir, exist_ok=True)
+        self._reconcile_lifecycle_residue()
+
+    def _reconcile_lifecycle_residue(self) -> None:
+        for path in Path(self._cache_dir).iterdir():
+            match = _RESIDUE_NAME.fullmatch(path.name)
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if (
+                match is None
+                or Path(match.group("public")).suffix.lower()
+                not in _GENERATED_IMAGE_SUFFIXES
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+            ):
+                continue
+            try:
+                path.unlink()
+            except OSError as exc:
+                logger.warning(f"[ImageGen] 清理未完成圖片殘留失敗: {path} - {exc}")
 
     def update_settings(
         self, max_image_size_mb: int | None = None, max_cache_count: int | None = None
     ) -> None:
-        """更新設定。"""
         if max_image_size_mb is not None:
             self._max_image_size_mb = max_image_size_mb
         if max_cache_count is not None:
@@ -40,24 +157,17 @@ class ImageProcessor:
 
     @property
     def cache_dir(self) -> str:
-        """取得快取目錄路徑。"""
         return self._cache_dir
 
     async def download_image(self, url: str) -> tuple[bytes, str] | None:
-        """下載圖片並返回二進位制資料和 MIME 型別。"""
         try:
-            data: bytes | None = None
-            if os.path.exists(url) and os.path.isfile(url):
-                with open(url, "rb") as f:
-                    data = f.read()
-            else:
+            path = url
+            if not (os.path.exists(url) and os.path.isfile(url)):
                 # 使用插件快取目錄
                 file_name = f"ref_{hashlib.md5(url.encode()).hexdigest()[:10]}"
                 path = os.path.join(self._cache_dir, file_name)
                 path = await download_image_by_url(url, path=path)
-                if path:
-                    with open(path, "rb") as f:
-                        data = f.read()
+            data = Path(path).read_bytes() if path else None
 
             if not data:
                 return None
@@ -75,7 +185,6 @@ class ImageProcessor:
         return None
 
     def _detect_mime_type(self, data: bytes) -> str:
-        """檢測圖片 MIME 型別。"""
         if data.startswith(b"\xff\xd8"):
             return "image/jpeg"
         elif data.startswith(b"GIF"):
@@ -85,15 +194,13 @@ class ImageProcessor:
         return "image/png"
 
     async def get_avatar(self, user_id: str) -> bytes | None:
-        """取得使用者頭像。"""
         url = f"https://q4.qlogo.cn/headimg_dl?dst_uin={user_id}&spec=640"
         try:
             file_name = f"avatar_{user_id}.jpg"
             path = os.path.join(self._cache_dir, file_name)
             path = await download_image_by_url(url, path=path)
             if path:
-                with open(path, "rb") as f:
-                    return f.read()
+                return Path(path).read_bytes()
         except Exception as e:
             logger.debug(f"[ImageGen] 取得頭像失敗 (user_id={user_id}): {e}")
         return None
@@ -101,7 +208,6 @@ class ImageProcessor:
     async def fetch_images_from_event(
         self, event: AstrMessageEvent
     ) -> list[tuple[bytes, str]]:
-        """從訊息事件中提取圖片（包括直接傳送的圖片、引用訊息中的圖片、被@使用者的頭像）。"""
         images_data: list[tuple[bytes, str]] = []
 
         if not event.message_obj or not event.message_obj.message:
@@ -155,14 +261,14 @@ class ImageProcessor:
         return images_data
 
     async def cleanup_cache(self) -> None:
-        """執行快取清理。"""
         if not os.path.exists(self._cache_dir):
             return
+        self._reconcile_lifecycle_residue()
 
         files = []
         for f in os.listdir(self._cache_dir):
             path = os.path.join(self._cache_dir, f)
-            if os.path.isfile(path):
+            if os.path.isfile(path) and not os.path.islink(path):
                 files.append((path, os.path.getmtime(path)))
 
         # 按修改時間排序（舊的在前）
@@ -183,14 +289,12 @@ class ImageProcessor:
             )
 
     def save_generated_image(self, task_id: str, img_bytes: bytes) -> str | None:
-        """儲存生成的圖片到快取目錄，返回檔案路徑。"""
         try:
             import time
 
             file_name = f"gen_{task_id}_{int(time.time())}_{hashlib.md5(img_bytes).hexdigest()[:6]}.png"
             file_path = os.path.join(self._cache_dir, file_name)
-            with open(file_path, "wb") as f:
-                f.write(img_bytes)
+            Path(file_path).write_bytes(img_bytes)
             return file_path
         except Exception as exc:
             logger.error(f"[ImageGen] 儲存圖片失敗: {exc}")
