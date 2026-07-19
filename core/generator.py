@@ -67,7 +67,6 @@ class ImageGenerator:
         progress_callback: Callable[[GenerationProgress], None] | None = None,
     ) -> GenerationResult:
         """執行生圖邏輯。"""
-        self._ensure_lifecycle()
         # 先將參考圖批次轉換成相容格式，再呼叫下游適配器
         converted_images: list[ImageData] = []
         if request.images:
@@ -87,9 +86,8 @@ class ImageGenerator:
         )
         if count == 1:
             started_at = time.monotonic()
-            async with self._provider_lock:
-                async with self._batch_limiter:
-                    result = await self._generate_one(patched_request)
+            async with self._batch_limiter:
+                result = await self._generate_one(patched_request)
             if progress_callback:
                 progress_callback(
                     GenerationProgress(
@@ -118,10 +116,9 @@ class ImageGenerator:
                 task_id=task_id,
                 count=1,
             )
-            async with self._provider_lock:
-                async with self._batch_limiter:
-                    result = await self._generate_one(one_request)
-                results[index] = result
+            async with self._batch_limiter:
+                result = await self._generate_one(one_request)
+            results[index] = result
             if progress_callback:
                 completed = sum(item is not None for item in results)
                 succeeded = sum(bool(item and item.images) for item in results)
@@ -162,8 +159,7 @@ class ImageGenerator:
             return GenerationResult(
                 images=successful_images,
                 error=(
-                    f"批量部分成功：{successful_requests}/{count} 個請求成功"
-                    f"；{detail}"
+                    f"批量部分成功：{successful_requests}/{count} 個請求成功；{detail}"
                 ),
             )
         return GenerationResult(images=successful_images, error=None)
@@ -185,7 +181,9 @@ class ImageGenerator:
         try:
             capabilities = adapter.get_capabilities()
             images = request.images
-            aspect_ratio = request.aspect_ratio if request.aspect_ratio != "自動" else None
+            aspect_ratio = (
+                request.aspect_ratio if request.aspect_ratio != "自動" else None
+            )
             resolution = request.resolution if request.resolution != "自動" else None
             if not capabilities & ImageCapability.IMAGE_TO_IMAGE:
                 images = []
@@ -236,8 +234,6 @@ class ImageGenerator:
             self._lifecycle_condition = anyio.Condition()
             self._active_generations = 0
             self._adapter_updating = False
-        if not hasattr(self, "_provider_lock"):
-            self._provider_lock = anyio.Lock()
 
     def update_model(self, model: str) -> None:
         """更新適配器使用的模型。"""

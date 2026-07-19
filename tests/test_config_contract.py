@@ -191,6 +191,19 @@ def test_per_file_limit_is_strictly_bounded(raw: JsonValue, expected: int) -> No
     )
 
 
+def test_provider_receives_configured_image_limit() -> None:
+    manager, _ = load_config(
+        {
+            "api_providers": [provider("primary", ["model-a"])],
+            "user_limits": {"max_image_size_mb": 7},
+        }
+    )
+
+    adapter = manager.adapter_config
+    assert adapter is not None
+    assert adapter.max_image_size_mb == 7
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

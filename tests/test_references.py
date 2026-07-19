@@ -66,6 +66,18 @@ async def test_baseline_local_reference_below_per_file_limit_is_loaded(
     assert loaded == (b"\x89PNG\r\n\x1a\nsmall", "image/png")
 
 
+def test_generated_image_over_limit_is_not_written(tmp_path: Path) -> None:
+    # Given
+    processor = ImageProcessor(str(tmp_path / "cache"), 1, 10)
+
+    # When
+    output = processor.save_generated_image("task", b"x" * (MIB + 1))
+
+    # Then
+    assert output is None
+    assert list((tmp_path / "cache").iterdir()) == []
+
+
 @pytest.mark.asyncio
 async def test_fifth_raw_source_rejects_before_any_download() -> None:
     # Given

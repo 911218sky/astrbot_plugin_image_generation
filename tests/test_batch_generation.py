@@ -60,18 +60,6 @@ class TextOnlyRecordingAdapter(FakeAdapter):
         return await super().generate(request)
 
 
-class SingleFlightAdapter(FakeAdapter):
-    async def generate(self, request: GenerationRequest) -> GenerationResult:
-        self.active += 1
-        self.peak = max(self.peak, self.active)
-        await anyio.lowlevel.checkpoint()
-        overloaded = self.active > 1
-        self.active -= 1
-        if overloaded:
-            return GenerationResult(images=None, error="provider overloaded")
-        return GenerationResult(images=[f"image:{request.task_id}".encode()])
-
-
 def make_generator(adapter: FakeAdapter, parallelism: int = 2) -> ImageGenerator:
     generator = object.__new__(ImageGenerator)
     generator.adapter = adapter
@@ -90,27 +78,23 @@ async def test_batch_fanout_preserves_order_and_reports_partial_success() -> Non
 
     assert result.images == [b"image:task-1", b"image:task-3", b"image:task-4"]
     assert result.error is not None and "部分成功" in result.error
-    assert adapter.peak == 1
+    assert adapter.peak == 2
     assert adapter.calls == ["task-1", "task-2", "task-3", "task-4"]
 
 
 @pytest.mark.asyncio
-async def test_batch_generation_serializes_single_flight_provider_requests() -> None:
-    adapter = SingleFlightAdapter()
+async def test_batch_generation_uses_configured_parallelism() -> None:
+    adapter = FakeAdapter()
     generator = make_generator(adapter, parallelism=2)
 
     result = await generator.generate(
         GenerationRequest(prompt="cat", task_id="task", count=4)
     )
 
-    assert result.images == [
-        b"image:task-1",
-        b"image:task-2",
-        b"image:task-3",
-        b"image:task-4",
-    ]
-    assert result.error is None
-    assert adapter.peak == 1
+    assert result.images is not None
+    assert len(result.images) == 3
+    assert result.error is not None and "部分成功" in result.error
+    assert adapter.peak == 2
 
 
 @pytest.mark.asyncio
@@ -216,9 +200,7 @@ async def test_generation_waits_for_adapter_replacement() -> None:
 
     async def run_generation() -> None:
         result_holder.append(
-            await generator.generate(
-                GenerationRequest(prompt="cat", task_id="task")
-            )
+            await generator.generate(GenerationRequest(prompt="cat", task_id="task"))
         )
 
     async with anyio.create_task_group() as task_group:
