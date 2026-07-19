@@ -128,6 +128,31 @@ def test_queue_setting_does_not_replace_active_concurrency() -> None:
     )
 
 
+def test_malformed_numeric_settings_fall_back_without_crashing() -> None:
+    manager, _ = load_config(
+        {
+            "generation": {
+                "timeout": "slow",
+                "max_concurrent_tasks": "many",
+            },
+            "user_limits": {
+                "rate_limit_seconds": "soon",
+                "daily_limit_count": "many",
+            },
+            "cache": {
+                "max_cache_count": "lots",
+                "cleanup_interval_hours": "often",
+            },
+        }
+    )
+
+    assert manager.max_concurrent_tasks == 3
+    assert manager.usage_settings.rate_limit_seconds == 0
+    assert manager.usage_settings.daily_limit_count == 10
+    assert manager.cache_settings.max_cache_count == 100
+    assert manager.cache_settings.cleanup_interval_hours == 24
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [

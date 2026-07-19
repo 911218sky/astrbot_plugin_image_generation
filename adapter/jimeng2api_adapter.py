@@ -7,6 +7,11 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
+from ..core.provider_transport import (
+    decode_provider_base64,
+    download_provider_image,
+    read_provider_json,
+)
 from ..core.types import GenerationRequest, ImageCapability
 
 
@@ -79,7 +84,9 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                         )
                         return None, f"API 錯誤 ({resp.status})"
 
-                    data_json = await resp.json()
+                    data_json = await read_provider_json(resp)
+                    if data_json is None:
+                        return None, "API 回應格式錯誤"
                     logger.debug(f"{prefix} Compositions 響應: {data_json}")
                     logger.info(f"{prefix} Compositions 成功 (耗時: {duration:.2f}s)")
                     return await self._extract_images(data_json, request.task_id)
@@ -116,7 +123,9 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                         )
                         return None, f"API 錯誤 ({resp.status})"
 
-                    data_json = await resp.json()
+                    data_json = await read_provider_json(resp)
+                    if data_json is None:
+                        return None, "API 回應格式錯誤"
                     logger.debug(f"{prefix} Generations 響應: {data_json}")
                     logger.info(f"{prefix} Generations 成功 (耗時: {duration:.2f}s)")
                     return await self._extract_images(data_json, request.task_id)
@@ -142,18 +151,13 @@ class Jimeng2APIAdapter(BaseImageAdapter):
 
         images = []
         for item in data:
-            if "b64_json" in item:
-                images.append(base64.b64decode(item["b64_json"]))
-            elif "url" in item:
-                async with self._get_session().get(
-                    item["url"], proxy=self.proxy, timeout=self._get_download_timeout()
-                ) as resp:
-                    if resp.status == 200:
-                        images.append(await resp.read())
-                    else:
-                        logger.error(
-                            f"{prefix} 下載圖像失敗 ({resp.status}): {item['url']}"
-                        )
+            if decoded := decode_provider_base64(item.get("b64_json")):
+                images.append(decoded)
+            elif url := item.get("url"):
+                if downloaded := await download_provider_image(url):
+                    images.append(downloaded)
+                else:
+                    logger.error(f"{prefix} 下載圖像失敗")
 
         if not images:
             return None, "未找到有效的圖片資料"
@@ -180,7 +184,10 @@ class Jimeng2APIAdapter(BaseImageAdapter):
                     proxy=self.proxy,
                     timeout=self._get_download_timeout(),
                 ) as resp:
-                    resp_json = await resp.json()
+                    resp_json = await read_provider_json(resp)
+                    if resp_json is None:
+                        results[f"key_{i}"] = {"error": "API 回應格式錯誤"}
+                        continue
                     status_code = resp.status
                     results[f"key_{i}"] = {"status": status_code, "data": resp_json}
                     if status_code == 200:

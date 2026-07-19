@@ -58,3 +58,31 @@ async def test_single_generation_keeps_original_request_shape() -> None:
     assert result.images == [b"image:task"]
     assert result.error is None
     assert adapter.calls == ["task"]
+
+
+@pytest.mark.asyncio
+async def test_direct_generation_clamps_untrusted_count() -> None:
+    adapter = FakeAdapter()
+    generator = make_generator(adapter)
+
+    result = await generator.generate(
+        GenerationRequest(prompt="cat", task_id="task", count=999999)
+    )
+
+    assert result.images is not None
+    assert len(adapter.calls) == 4
+
+
+@pytest.mark.asyncio
+async def test_provider_multiple_images_are_reduced_to_one_per_request() -> None:
+    class MultiImageAdapter(FakeAdapter):
+        async def generate(self, request: GenerationRequest) -> GenerationResult:
+            return GenerationResult(images=[b"first", b"second"])
+
+    generator = make_generator(MultiImageAdapter())
+
+    result = await generator.generate(
+        GenerationRequest(prompt="cat", task_id="task", count=2)
+    )
+
+    assert result.images == [b"first", b"first"]

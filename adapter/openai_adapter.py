@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import time
 from typing import Any
 
@@ -11,6 +9,11 @@ import aiohttp
 from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
+from ..core.provider_transport import (
+    decode_provider_base64,
+    download_provider_image,
+    read_provider_json,
+)
 from ..core.types import GenerationRequest, ImageCapability
 
 
@@ -103,29 +106,13 @@ class OpenAIAdapter(BaseImageAdapter):
         duration: float,
     ) -> tuple[dict[str, Any] | None, str | None]:
         """Read JSON response with tolerant handling for non-standard content types."""
-        try:
-            return await resp.json(content_type=None), None
-        except (aiohttp.ContentTypeError, json.JSONDecodeError):
-            raw_text = await resp.text()
-            if not raw_text.strip():
-                logger.error(
-                    f"{prefix} API 回應為空 (耗時: {duration:.2f}s, Content-Type: {resp.headers.get('Content-Type', 'unknown')})"
-                )
-                return None, "API 回應為空"
-
-            try:
-                data = json.loads(raw_text)
-            except json.JSONDecodeError:
-                preview = raw_text[:300].replace("\n", "\\n")
-                logger.error(
-                    f"{prefix} API 回應不是有效 JSON (耗時: {duration:.2f}s, Content-Type: {resp.headers.get('Content-Type', 'unknown')}): {preview}"
-                )
-                return None, "API 回應格式錯誤，無法解析生成結果"
-            else:
-                logger.warning(
-                    f"{prefix} API 使用非標準 Content-Type 回應 JSON: {resp.headers.get('Content-Type', 'unknown')}"
-                )
-                return data, None
+        data = await read_provider_json(resp)
+        if data is not None:
+            return data, None
+        logger.error(
+            f"{prefix} API 回應格式錯誤或超過大小上限 (耗時: {duration:.2f}s)"
+        )
+        return None, "API 回應格式錯誤，無法解析生成結果"
 
     def _build_payload(self, request: GenerationRequest) -> dict:
         """構建請求載荷。"""
@@ -168,15 +155,11 @@ class OpenAIAdapter(BaseImageAdapter):
 
         images = []
         for item in response["data"]:
-            if "b64_json" in item:
-                images.append(base64.b64decode(item["b64_json"]))
-            elif "url" in item:
-                # 如果返回的是 URL，需要下載（雖然我們請求的是 b64_json）
-                async with self._get_session().get(
-                    item["url"], proxy=self.proxy, timeout=self._get_download_timeout()
-                ) as resp:
-                    if resp.status == 200:
-                        images.append(await resp.read())
+            if decoded := decode_provider_base64(item.get("b64_json")):
+                images.append(decoded)
+            elif url := item.get("url"):
+                if downloaded := await download_provider_image(url):
+                    images.append(downloaded)
 
         if not images:
             return None, "未找到有效的圖片資料"

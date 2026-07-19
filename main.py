@@ -185,6 +185,7 @@ class ImageGenerationPlugin(Star):
             self.generator = ImageGenerator(
                 self.config_manager.adapter_config,
                 batch_parallelism=self.config_manager.max_concurrent_tasks,
+                max_batch_count=self.config_manager.max_batch_count,
             )
         else:
             logger.error("[ImageGen] 適配器配置載入失敗，插件未初始化")
@@ -905,6 +906,13 @@ class ImageGenerationPlugin(Star):
 
         if not prompt:
             yield event.plain_result("❌ 請提供提示詞或預設名稱。")
+            return
+
+        if (
+            not self.config_manager.adapter_config
+            or not self.config_manager.adapter_config.api_keys
+        ):
+            yield event.plain_result("❌ 未配置 API Key，無法生成圖片")
             return
 
         admission = await self.reserve_generation(

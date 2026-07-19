@@ -8,6 +8,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
+from ..core.provider_transport import decode_provider_base64, read_provider_json
 from ..core.constants import GEMINI_DEFAULT_BASE_URL, GEMINI_SAFETY_CATEGORIES
 from ..core.types import GenerationRequest, ImageCapability
 
@@ -122,7 +123,7 @@ class GeminiAdapter(BaseImageAdapter):
                         f"{prefix} 錯誤 {response.status} (耗時: {duration:.2f}s): {preview}"
                     )
                     return None
-                return await response.json()
+                return await read_provider_json(response)
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {e}")
@@ -143,8 +144,8 @@ class GeminiAdapter(BaseImageAdapter):
             images: list[bytes] = []
             for part in parts:
                 inline_data = part.get("inline_data") or part.get("inlineData")
-                if inline_data and inline_data.get("data"):
-                    images.append(base64.b64decode(inline_data["data"]))
+                if inline_data and (decoded := decode_provider_base64(inline_data.get("data"))):
+                    images.append(decoded)
 
             return images if images else None
         except Exception as exc:  # noqa: BLE001

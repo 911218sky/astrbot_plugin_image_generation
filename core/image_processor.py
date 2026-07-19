@@ -292,6 +292,12 @@ class ImageProcessor:
         self, task_id: str, img_bytes: bytes, sequence: int = 1
     ) -> str | None:
         try:
+            max_bytes = self._max_image_size_mb * 1024 * 1024
+            if not img_bytes or len(img_bytes) > max_bytes:
+                logger.warning(
+                    f"[ImageGen] 生成圖片超過大小限制 ({self._max_image_size_mb}MB)"
+                )
+                return None
             import time
 
             file_name = (

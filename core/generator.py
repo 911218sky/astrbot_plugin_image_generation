@@ -19,16 +19,23 @@ from .types import (
     GenerationResult,
     ImageData,
 )
-from .utils import convert_images_batch
+from .constants import DEFAULT_MAX_BATCH_COUNT
+from .utils import convert_images_batch, normalize_batch_count
 
 
 class ImageGenerator:
     """適配器編排器，負責分發生圖請求。"""
 
-    def __init__(self, adapter_config: AdapterConfig, batch_parallelism: int = 3):
+    def __init__(
+        self,
+        adapter_config: AdapterConfig,
+        batch_parallelism: int = 3,
+        max_batch_count: int = DEFAULT_MAX_BATCH_COUNT,
+    ):
         self.adapter_config = adapter_config
         self.adapter = self._create_adapter(adapter_config)
-        self._batch_limiter = anyio.CapacityLimiter(max(1, min(4, batch_parallelism)))
+        self._max_batch_count = normalize_batch_count(max_batch_count, 10)
+        self._batch_limiter = anyio.CapacityLimiter(max(1, batch_parallelism))
 
     def _create_adapter(self, config: AdapterConfig):
         """根據配置建立對應的適配器。"""
@@ -65,9 +72,12 @@ class ImageGenerator:
             count=1,
         )
 
-        count = max(1, request.count)
+        count = normalize_batch_count(
+            request.count, getattr(self, "_max_batch_count", DEFAULT_MAX_BATCH_COUNT)
+        )
         if count == 1:
-            return await self._generate_one(patched_request)
+            async with self._batch_limiter:
+                return await self._generate_one(patched_request)
 
         results: list[GenerationResult | None] = [None] * count
 
@@ -119,7 +129,13 @@ class ImageGenerator:
 
     async def _generate_one(self, request: GenerationRequest) -> GenerationResult:
         try:
-            return await self.adapter.generate(request)
+            result = await self.adapter.generate(request)
+            if result.images and len(result.images) > 1:
+                logger.warning(
+                    f"[ImageGen] 適配器一次返回 {len(result.images)} 張圖片，僅採用第一張"
+                )
+                return GenerationResult(images=[result.images[0]], error=result.error)
+            return result
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ImageGen] 生成失敗: {exc}", exc_info=True)
             return GenerationResult(images=None, error=str(exc))

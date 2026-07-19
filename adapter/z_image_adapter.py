@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import time
 from typing import Any
 
@@ -13,6 +12,11 @@ from ..core.constants import (
     RESOLUTION_2K_MAP,
 )
 from ..core.types import GenerationRequest, GenerationResult, ImageCapability
+from ..core.provider_transport import (
+    decode_provider_base64,
+    download_provider_image,
+    read_provider_json,
+)
 
 
 class ZImageAdapter(BaseImageAdapter):
@@ -75,7 +79,9 @@ class ZImageAdapter(BaseImageAdapter):
                     )
                     return None, f"API 錯誤 ({resp.status})"
 
-                data = await resp.json()
+                data = await read_provider_json(resp)
+                if data is None:
+                    return None, "API 回應格式錯誤"
                 logger.info(f"{prefix} 生成成功 (耗時: {duration:.2f}s)")
                 return await self._extract_images(data, request.task_id)
         except Exception as e:
@@ -122,8 +128,8 @@ class ZImageAdapter(BaseImageAdapter):
 
         images = []
         for item in data["data"]:
-            if "b64_json" in item:
-                images.append(base64.b64decode(item["b64_json"]))
+            if decoded := decode_provider_base64(item.get("b64_json")):
+                images.append(decoded)
             elif "url" in item:
                 # 如果返回的是 URL，需要下載
                 logger.debug(f"{prefix} 正在下載圖像: {item['url'][:50]}...")
@@ -143,17 +149,10 @@ class ZImageAdapter(BaseImageAdapter):
         self, url: str, task_id: str | None = None
     ) -> bytes | None:
         """下載圖像。"""
-        session = self._get_session()
         prefix = self._get_log_prefix(task_id)
-        try:
-            async with session.get(
-                url, proxy=self.proxy, timeout=self._get_download_timeout()
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.read()
-                    logger.debug(f"{prefix} 圖像下載成功: {len(data)} bytes")
-                    return data
-                logger.error(f"{prefix} 下載圖像失敗 ({resp.status}): {url}")
-        except Exception as e:
-            logger.error(f"{prefix} 下載圖像異常: {e}")
-        return None
+        data = await download_provider_image(url)
+        if data:
+            logger.debug(f"{prefix} 圖像下載成功: {len(data)} bytes")
+        else:
+            logger.error(f"{prefix} 圖像下載失敗")
+        return data
