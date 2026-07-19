@@ -247,11 +247,15 @@ class ConfigManager:
         )
 
         # 生成設定
+        show_task_started = gen_cfg.get("show_task_started", False)
+        if not isinstance(show_task_started, bool):
+            show_task_started = False
+
         self._plugin_config.generation_settings = GenerationSettings(
             default_aspect_ratio=gen_cfg.get("default_aspect_ratio", "自動"),
             default_resolution=gen_cfg.get("default_resolution", "1K"),
             max_concurrent_tasks=max(1, gen_cfg.get("max_concurrent_tasks", 3)),
-            show_task_started=gen_cfg.get("show_task_started", False),
+            show_task_started=show_task_started,
             show_generation_info=gen_cfg.get("show_generation_info", False),
             show_model_info=gen_cfg.get("show_model_info", False),
         )

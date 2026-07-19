@@ -419,8 +419,8 @@
         ]
       },
       "show_task_started": {
-        "description": "顯示生圖任務啟動提示",
-        "hint": "生圖任務建立後，是否傳送包含任務 ID 的啟動提示；關閉後仍會正常執行背景生圖任務。",
+        "description": "顯示生圖任務啟動提示（命令與 AI）",
+        "hint": "控制 /img gen 命令與 AI 呼叫 generate_image 時是否傳送啟動提示；關閉後仍會正常執行背景生圖任務。",
         "type": "bool",
         "default": false
       },

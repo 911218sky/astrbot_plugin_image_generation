@@ -108,7 +108,7 @@
 | `max_concurrent_tasks` | number  | `3`      | 最大併發生圖任務數，防止資源耗盡。                                                                         |
 | `default_aspect_ratio` | string  | `"自動"` | 預設圖片寬高比。可選值：`自動`、`1:1`、`2:3`、`3:2`、`3:4`、`4:3`、`4:5`、`5:4`、`9:16`、`16:9`、`21:9`。  |
 | `default_resolution`   | string  | `"1K"`   | 預設解析度（僅部分模型支援）。可選值：`1K`、`2K`、`4K`。                                                   |
-| `show_task_started`     | boolean | `false`  | 是否傳送生圖任務建立時的啟動提示；關閉後仍會正常執行背景生圖任務。                                             |
+| `show_task_started`     | boolean | `false`  | 是否在 `/img gen` 命令與 AI 呼叫 `generate_image` 時傳送任務啟動提示；關閉後仍會正常執行背景生圖任務。       |
 | `show_generation_info` | boolean | `false`  | 生圖成功後展示耗時和生成數量，可於 Web 設定中開啟或關閉。                                                 |
 | `show_model_info`      | boolean | `false`  | 生圖成功後展示所使用的模型名稱。                                                                           |
 
