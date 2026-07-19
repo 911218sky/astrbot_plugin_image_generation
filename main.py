@@ -6,8 +6,10 @@ AstrBot 圖像生成插件主模組
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 import datetime
 import hashlib
+import inspect
 import json
 import time
 from collections.abc import Coroutine
@@ -42,7 +44,12 @@ from .core.reference_collector import (
 )
 from .core.safety_auditor import SafetyAuditor
 from .core.task_manager import TaskManager
-from .core.types import GenerationRequest, ImageCapability, ImageData
+from .core.types import (
+    GenerationProgress,
+    GenerationRequest,
+    ImageCapability,
+    ImageData,
+)
 from .core.usage_manager import UsageManager
 from .core.utils import (
     extract_self_avatar_alias,
@@ -173,6 +180,8 @@ class ImageGenerationPlugin(Star):
         self._jimeng_task_adapter: BaseImageAdapter | None = None
         self._active_generation_tasks: dict[str, dict[str, Any]] = {}
         self._recent_generation_tasks: list[dict[str, Any]] = []
+        self._image_generation_tool: ImageGenerationTool | None = None
+        self._image_tool_base_parameters: dict[str, Any] | None = None
         self.page_api = None
 
         self._register_official_page_api_if_available()
@@ -185,6 +194,7 @@ class ImageGenerationPlugin(Star):
             self.generator = ImageGenerator(
                 self.config_manager.adapter_config,
                 batch_parallelism=self.config_manager.max_concurrent_tasks,
+                max_batch_count=self.config_manager.max_batch_count,
             )
         else:
             logger.error("[ImageGen] 適配器配置載入失敗，插件未初始化")
@@ -192,6 +202,8 @@ class ImageGenerationPlugin(Star):
         # 註冊 LLM 工具
         if self.config_manager.enable_llm_tool and self.generator:
             tool = ImageGenerationTool(plugin=self)
+            self._image_generation_tool = tool
+            self._image_tool_base_parameters = deepcopy(tool.parameters)
             self._adjust_tool_parameters(tool)
             self.context.add_llm_tools(tool)
             logger.info("[ImageGen] 已註冊圖像生成工具")
@@ -281,7 +293,19 @@ class ImageGenerationPlugin(Star):
         if not self.generator or not self.generator.adapter:
             return
         capabilities = self.generator.adapter.get_capabilities()
-        adjust_tool_parameters(tool, capabilities)
+        adjust_tool_parameters(tool, capabilities, self.config_manager.max_batch_count)
+
+    def _refresh_image_tool_parameters(self) -> None:
+        if (
+            self._image_generation_tool is None
+            or self._image_tool_base_parameters is None
+        ):
+            return
+        self._image_generation_tool.parameters.clear()
+        self._image_generation_tool.parameters.update(
+            deepcopy(self._image_tool_base_parameters)
+        )
+        self._adjust_tool_parameters(self._image_generation_tool)
 
     def create_background_task(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
         """建立後臺任務並新增到管理器中。"""
@@ -377,6 +401,26 @@ class ImageGenerationPlugin(Star):
         now = time.time()
         info["status"] = "running"
         info["running_at"] = now
+        info["phase"] = "呼叫供應商生成"
+
+    def _update_generation_progress(
+        self, task_id: str, progress: GenerationProgress
+    ) -> None:
+        info = self._active_generation_tasks.get(task_id)
+        if not info:
+            return
+        info.update(
+            {
+                "completed_count": progress.completed,
+                "batch_count": progress.total,
+                "success_count": progress.succeeded,
+                "failed_count": progress.failed,
+                "provider_elapsed": progress.elapsed,
+                "phase": f"已完成 {progress.completed}/{progress.total}",
+            }
+        )
+        if progress.last_error:
+            info["last_error"] = progress.last_error
 
     def _remember_generation_task(
         self, task_id: str, status: str, **extra: Any
@@ -443,7 +487,7 @@ class ImageGenerationPlugin(Star):
             user=unified_msg_origin,
             mode="圖生圖" if images else "文生圖",
             aspect_ratio=aspect_ratio or "自動",
-            resolution=resolution or "1K",
+            resolution=resolution or "自動",
         )
 
     async def _notify_generation_failure(
@@ -478,8 +522,8 @@ class ImageGenerationPlugin(Star):
         admission_ticket: AdmissionTicket,
         batch_count: int = 1,
         images_data: list[tuple[bytes, str]] | None = None,
-        aspect_ratio: str = "1:1",
-        resolution: str = "1K",
+        aspect_ratio: str = "自動",
+        resolution: str = "自動",
         task_id: str | None = None,
     ) -> None:
         """非同步生成圖片併傳送。"""
@@ -500,40 +544,28 @@ class ImageGenerationPlugin(Star):
             "resolution": resolution,
             "reference_count": len(images_data or []),
             "batch_count": batch_count,
+            "completed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "provider_elapsed": 0.0,
+            "phase": "等待生成槽",
+            "last_error": "",
         }
         try:
             await self.admission_controller.wait(admission_ticket)
-            if not self.generator or not self.generator.adapter:
+            if not self.generator:
                 await self.context.send_message(
                     unified_msg_origin,
                     MessageChain().message("❌ 生圖服務尚未初始化，暫時無法生成圖片"),
                 )
                 return
 
-            capabilities = self.generator.adapter.get_capabilities()
-            if not (capabilities & ImageCapability.IMAGE_TO_IMAGE) and images_data:
-                logger.warning(
-                    f"[ImageGen] 當前適配器不支援參考圖，已忽略 {len(images_data)} 張圖片"
-                )
-                images_data = None
-            if (
-                not capabilities & ImageCapability.ASPECT_RATIO
-                and aspect_ratio != "自動"
-            ):
-                logger.info(
-                    f"[ImageGen] 當前適配器不支援指定比例，已忽略參數: {aspect_ratio}"
-                )
-                aspect_ratio = "自動"
-            if not capabilities & ImageCapability.RESOLUTION and resolution != "1K":
-                logger.info(
-                    f"[ImageGen] 當前適配器不支援指定解析度，已忽略參數: {resolution}"
-                )
-                resolution = "1K"
-
             final_ar = validate_aspect_ratio(aspect_ratio) or None
             if final_ar == "自動":
                 final_ar = None
             final_res = validate_resolution(resolution)
+            if final_res == "自動":
+                final_res = None
             images = [
                 ImageData(data=data, mime_type=mime) for data, mime in images_data or []
             ]
@@ -584,16 +616,23 @@ class ImageGenerationPlugin(Star):
         if not self.generator:
             logger.warning("[ImageGen] 生成器未初始化，跳過生成請求")
             return
-        result = await self.generator.generate(
-            GenerationRequest(
-                prompt=prompt,
-                images=images,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-                task_id=task_id,
-                count=batch_count,
-            )
+        generation_request = GenerationRequest(
+            prompt=prompt,
+            images=images,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            task_id=task_id,
+            count=batch_count,
         )
+        def progress_callback(progress: GenerationProgress) -> None:
+            self._update_generation_progress(task_id, progress)
+        generate_kwargs: dict[str, Any] = {}
+        try:
+            if "progress_callback" in inspect.signature(self.generator.generate).parameters:
+                generate_kwargs["progress_callback"] = progress_callback
+        except (TypeError, ValueError):
+            pass
+        result = await self.generator.generate(generation_request, **generate_kwargs)
         end_time = time.time()
         duration = end_time - start_time
 
@@ -635,6 +674,11 @@ class ImageGenerationPlugin(Star):
             )
             return
 
+        max_image_size_mb = getattr(self.image_processor, "max_image_size_mb", 30)
+        max_image_bytes = max_image_size_mb * 1024 * 1024
+        oversized_count = sum(
+            len(img_bytes) > max_image_bytes for img_bytes in result.images
+        )
         generated_file_paths: list[str] = []
         for index, img_bytes in enumerate(result.images, 1):
             file_path = self.image_processor.save_generated_image(
@@ -645,13 +689,18 @@ class ImageGenerationPlugin(Star):
 
         if not generated_file_paths:
             logger.warning(f"[ImageGen] 任務 {task_id} 未能儲存任何生成圖片")
+            storage_error = (
+                f"生成完成，但圖片超過大小限制（{max_image_size_mb} MiB）"
+                if oversized_count == len(result.images)
+                else "生成完成，但圖片儲存失敗"
+            )
             await self._notify_generation_failure(
-                unified_msg_origin, "生成完成，但圖片儲存失敗"
+                unified_msg_origin, storage_error
             )
             self._remember_generation_task(
                 task_id,
                 "failed",
-                error="生成完成，但圖片儲存失敗",
+                error=storage_error,
                 image_count=0,
                 duration=duration,
             )
@@ -697,6 +746,10 @@ class ImageGenerationPlugin(Star):
         info_parts = []
         if partial_error:
             info_parts.append(f"批量提醒：{partial_error}")
+        if oversized_count:
+            info_parts.append(
+                f"已略過 {oversized_count} 張超過大小限制的圖片（上限 {max_image_size_mb} MiB）"
+            )
         if self.config_manager.show_generation_info:
             info_parts.append(
                 f"完成。\n耗時：{duration:.2f}s\n圖片數量：{len(generated_file_paths)}"
@@ -907,6 +960,13 @@ class ImageGenerationPlugin(Star):
             yield event.plain_result("❌ 請提供提示詞或預設名稱。")
             return
 
+        if (
+            not self.config_manager.adapter_config
+            or not self.config_manager.adapter_config.api_keys
+        ):
+            yield event.plain_result("❌ 未配置 API Key，無法生成圖片")
+            return
+
         admission = await self.reserve_generation(
             event.unified_msg_origin, batch_count
         )
@@ -1018,10 +1078,11 @@ class ImageGenerationPlugin(Star):
                 self.config_manager.save_model_setting(raw_model)
                 self.config_manager.reload()
 
-                if self.generator:
+                if self.generator and self.config_manager.adapter_config:
                     await self.generator.update_adapter(
                         self.config_manager.adapter_config
                     )
+                    self._refresh_image_tool_parameters()
 
                 yield event.plain_result(f"✅ 已切換模型：{raw_model}")
             else:

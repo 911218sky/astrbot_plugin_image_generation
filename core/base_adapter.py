@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import re
 
 import aiohttp
 
 from astrbot.api import logger
 
 from .constants import DEFAULT_DOWNLOAD_TIMEOUT
+from .provider_transport import MAX_PROVIDER_IMAGE_BYTES, provider_image_limit
 from .types import AdapterConfig, GenerationRequest, GenerationResult, ImageCapability
 from .utils import mask_sensitive
 
@@ -25,6 +27,10 @@ class BaseImageAdapter(abc.ABC):
         self.timeout = config.timeout
         self.download_timeout = DEFAULT_DOWNLOAD_TIMEOUT
         self.max_retry_attempts = min(5, max(1, config.max_retry_attempts))
+        self.max_image_size_bytes = min(
+            MAX_PROVIDER_IMAGE_BYTES,
+            max(1, config.max_image_size_mb) * 1024 * 1024,
+        )
         self.safety_settings = config.safety_settings
         self._session: aiohttp.ClientSession | None = None
 
@@ -115,7 +121,8 @@ class BaseImageAdapter(abc.ABC):
         prefix = self._get_log_prefix(request.task_id)
         last_error = "未配置 API Key"
         for attempt in range(1, self.max_retry_attempts + 1):
-            images, err = await self._generate_once(request)
+            with provider_image_limit(self.max_image_size_bytes):
+                images, err = await self._generate_once(request)
             if images is not None:
                 if attempt > 1:
                     logger.info(
@@ -128,7 +135,7 @@ class BaseImageAdapter(abc.ABC):
                 f"{prefix} 第 {attempt}/{self.max_retry_attempts} 次嘗試失敗: "
                 f"{last_error}"
             )
-            if attempt < self.max_retry_attempts:
+            if attempt < self.max_retry_attempts and self._is_retryable_error(last_error):
                 self._rotate_api_key()
                 logger.info(
                     f"{prefix} 已排程第 {attempt + 1}/{self.max_retry_attempts} 次重試"
@@ -143,6 +150,16 @@ class BaseImageAdapter(abc.ABC):
             f"{prefix} 已達最大重試次數 {self.max_retry_attempts} 次，最終失敗: {last_error}"
         )
         return GenerationResult(images=None, error=last_error)
+
+    @staticmethod
+    def _is_retryable_error(error: str) -> bool:
+        if error.startswith(("API 回應格式錯誤", "API 回應不是有效 JSON")):
+            return False
+        match = re.search(r"API 錯誤 \((\d{3})\)", error)
+        if match:
+            status = int(match.group(1))
+            return status in {408, 409, 425, 429} or status >= 500
+        return not error.startswith(("未配置 API Key", "提示詞未通過審核"))
 
     def _pre_generate(self, request: GenerationRequest) -> GenerationResult | None:
         """生成前的預處理檢查。

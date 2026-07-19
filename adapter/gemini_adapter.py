@@ -8,6 +8,7 @@ import aiohttp
 from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
+from ..core.provider_transport import decode_provider_base64, read_provider_json
 from ..core.constants import GEMINI_DEFAULT_BASE_URL, GEMINI_SAFETY_CATEGORIES
 from ..core.types import GenerationRequest, ImageCapability
 
@@ -29,9 +30,9 @@ class GeminiAdapter(BaseImageAdapter):
         """執行單次生圖請求。"""
         payload = self._build_payload(request)
         session = self._get_session()
-        response = await self._make_request(session, payload, request.task_id)
+        response, error = await self._make_request(session, payload, request.task_id)
         if response is None:
-            return None, "API 請求失敗"
+            return None, error or "API 請求失敗"
 
         images = self._extract_images(response, request.task_id)
         if images:
@@ -85,7 +86,7 @@ class GeminiAdapter(BaseImageAdapter):
         session: aiohttp.ClientSession,
         payload: dict,
         task_id: str | None,
-    ) -> dict | None:
+    ) -> tuple[dict | None, str | None]:
         """傳送 API 請求。"""
         start_time = time.time()
         url = f"{self.base_url or self.DEFAULT_BASE_URL}/v1beta/models/{self.model}:generateContent"
@@ -121,12 +122,13 @@ class GeminiAdapter(BaseImageAdapter):
                     logger.error(
                         f"{prefix} 錯誤 {response.status} (耗時: {duration:.2f}s): {preview}"
                     )
-                    return None
-                return await response.json()
+                    return None, f"API 錯誤 ({response.status})"
+                data = await read_provider_json(response)
+                return data, None if data is not None else "API 回應格式錯誤"
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {e}")
-            return None
+            return None, str(e).strip() or "API 請求失敗"
 
     def _extract_images(
         self, response: dict, task_id: str | None
@@ -143,8 +145,8 @@ class GeminiAdapter(BaseImageAdapter):
             images: list[bytes] = []
             for part in parts:
                 inline_data = part.get("inline_data") or part.get("inlineData")
-                if inline_data and inline_data.get("data"):
-                    images.append(base64.b64decode(inline_data["data"]))
+                if inline_data and (decoded := decode_provider_base64(inline_data.get("data"))):
+                    images.append(decoded)
 
             return images if images else None
         except Exception as exc:  # noqa: BLE001

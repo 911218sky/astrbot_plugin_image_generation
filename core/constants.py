@@ -37,7 +37,7 @@ DEFAULT_MAX_RETRY_ATTEMPTS = 5
 DEFAULT_ASPECT_RATIO = "自動"
 """預設寬高比。"""
 
-DEFAULT_RESOLUTION = "1K"
+DEFAULT_RESOLUTION = "自動"
 """預設解析度。"""
 
 DEFAULT_MAX_CONCURRENT_TASKS = 3
@@ -122,7 +122,7 @@ SUPPORTED_ASPECT_RATIOS = (
 
 # ========================== 支援的解析度 ==========================
 
-SUPPORTED_RESOLUTIONS = ("1K", "2K", "4K")
+SUPPORTED_RESOLUTIONS = ("自動", "1K", "2K", "4K")
 """工具引數中支援的解析度列表。"""
 
 

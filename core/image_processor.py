@@ -159,6 +159,10 @@ class ImageProcessor:
     def cache_dir(self) -> str:
         return self._cache_dir
 
+    @property
+    def max_image_size_mb(self) -> int:
+        return self._max_image_size_mb
+
     async def download_image(self, url: str) -> tuple[bytes, str] | None:
         try:
             path = url
@@ -292,6 +296,12 @@ class ImageProcessor:
         self, task_id: str, img_bytes: bytes, sequence: int = 1
     ) -> str | None:
         try:
+            max_bytes = self._max_image_size_mb * 1024 * 1024
+            if not img_bytes or len(img_bytes) > max_bytes:
+                logger.warning(
+                    f"[ImageGen] 生成圖片超過大小限制 ({self._max_image_size_mb}MB)"
+                )
+                return None
             import time
 
             file_name = (

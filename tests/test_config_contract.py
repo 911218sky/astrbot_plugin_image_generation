@@ -51,6 +51,8 @@ def test_baseline_config_manager_imports_and_preserves_active_concurrency() -> N
     assert manager.max_concurrent_tasks == 3
     assert manager.max_batch_count == 4
     assert manager.usage_settings.max_image_size_mb == 10
+    assert manager.default_aspect_ratio == "自動"
+    assert manager.default_resolution == "自動"
     assert manager.show_generation_info is False
     assert config.save_calls == 0
 
@@ -70,6 +72,22 @@ def test_task_started_notice_requires_a_boolean(
     manager, _ = load_config({"generation": {"show_task_started": raw}})
 
     assert manager.show_task_started is expected
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param(True, True, id="enabled"),
+        pytest.param(False, False, id="disabled"),
+        pytest.param("false", True, id="string-falls-back-to-enabled"),
+        pytest.param(0, True, id="integer-falls-back-to-enabled"),
+        pytest.param(None, True, id="null-falls-back-to-enabled"),
+    ],
+)
+def test_llm_tool_setting_requires_a_boolean(raw: JsonValue, expected: bool) -> None:
+    manager, _ = load_config({"enable_llm_tool": raw})
+
+    assert manager.enable_llm_tool is expected
 
 
 def test_baseline_schema_is_valid_json_with_generation_object() -> None:
@@ -126,6 +144,31 @@ def test_queue_setting_does_not_replace_active_concurrency() -> None:
     assert getattr(manager, "max_queued_tasks", None) == 4, (
         "IMG-101 RED: explicit queue limit must remain independently available"
     )
+
+
+def test_malformed_numeric_settings_fall_back_without_crashing() -> None:
+    manager, _ = load_config(
+        {
+            "generation": {
+                "timeout": "slow",
+                "max_concurrent_tasks": "many",
+            },
+            "user_limits": {
+                "rate_limit_seconds": "soon",
+                "daily_limit_count": "many",
+            },
+            "cache": {
+                "max_cache_count": "lots",
+                "cleanup_interval_hours": "often",
+            },
+        }
+    )
+
+    assert manager.max_concurrent_tasks == 3
+    assert manager.usage_settings.rate_limit_seconds == 0
+    assert manager.usage_settings.daily_limit_count == 10
+    assert manager.cache_settings.max_cache_count == 100
+    assert manager.cache_settings.cleanup_interval_hours == 24
 
 
 @pytest.mark.parametrize(

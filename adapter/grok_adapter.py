@@ -7,6 +7,11 @@ from typing import Any
 from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
+from ..core.provider_transport import (
+    decode_provider_base64,
+    download_provider_image,
+    read_provider_json,
+)
 from ..core.types import GenerationRequest, ImageCapability
 
 
@@ -61,7 +66,9 @@ class GrokAdapter(BaseImageAdapter):
                     )
                     return None, f"API 錯誤 ({resp.status})"
 
-                data = await resp.json()
+                data = await read_provider_json(resp)
+                if data is None:
+                    return None, "API 回應格式錯誤"
                 logger.info(f"{prefix} 生成成功 (耗時: {duration:.2f}s)")
                 return await self._extract_images(data)
         except Exception as e:
@@ -132,15 +139,11 @@ class GrokAdapter(BaseImageAdapter):
 
         images = []
         for item in response["data"]:
-            if "b64_json" in item:
-                images.append(base64.b64decode(item["b64_json"]))
-            elif "url" in item:
-                # 如果返回的是 URL，需要下載（雖然我們請求的是 b64_json）
-                async with self._get_session().get(
-                    item["url"], proxy=self.proxy, timeout=self._get_download_timeout()
-                ) as resp:
-                    if resp.status == 200:
-                        images.append(await resp.read())
+            if decoded := decode_provider_base64(item.get("b64_json")):
+                images.append(decoded)
+            elif url := item.get("url"):
+                if downloaded := await download_provider_image(url):
+                    images.append(downloaded)
 
         if not images:
             return None, "未找到有效的圖片資料"

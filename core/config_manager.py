@@ -11,9 +11,11 @@ from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 
 from .constants import (
+    DEFAULT_ASPECT_RATIO,
     DEFAULT_MAX_BATCH_COUNT,
     DEFAULT_MAX_IMAGE_SIZE_MB,
     DEFAULT_MAX_RETRY_ATTEMPTS,
+    DEFAULT_RESOLUTION,
 )
 from .types import AdapterConfig, AdapterType
 
@@ -52,8 +54,8 @@ class CacheSettings:
 class GenerationSettings:
     """生成設定。"""
 
-    default_aspect_ratio: str = "自動"
-    default_resolution: str = "1K"
+    default_aspect_ratio: str = DEFAULT_ASPECT_RATIO
+    default_resolution: str = DEFAULT_RESOLUTION
     max_concurrent_tasks: int = 3
     max_queued_tasks: int = 6
     max_batch_count: int = DEFAULT_MAX_BATCH_COUNT
@@ -129,7 +131,10 @@ class ConfigManager:
         safety_cfg = self._config.get("safety_audit", {})
         api_providers_raw = self._config.get("api_providers", [])
 
-        self._plugin_config.enable_llm_tool = self._config.get("enable_llm_tool", True)
+        raw_enable_llm_tool = self._config.get("enable_llm_tool", True)
+        self._plugin_config.enable_llm_tool = (
+            raw_enable_llm_tool if isinstance(raw_enable_llm_tool, bool) else True
+        )
         max_retry_attempts = _bounded_int(
             gen_cfg.get("max_retry_attempts", DEFAULT_MAX_RETRY_ATTEMPTS),
             DEFAULT_MAX_RETRY_ATTEMPTS,
@@ -193,7 +198,7 @@ class ConfigManager:
                     api_keys=api_keys,
                     available_models=available_models,
                     proxy=proxy,
-                    timeout=gen_cfg.get("timeout", 180),
+                    timeout=_bounded_int(gen_cfg.get("timeout", 180), 180, (1, 3600)),
                     max_retry_attempts=max_retry_attempts,
                     capability_options=capability_options,
                     extra=extra,
@@ -268,18 +273,30 @@ class ConfigManager:
         )
 
         self._plugin_config.usage_settings = UsageSettings(
-            rate_limit_seconds=max(0, user_limits_cfg.get("rate_limit_seconds", 0)),
+            rate_limit_seconds=_bounded_int(
+                user_limits_cfg.get("rate_limit_seconds", 0), 0, (0, 86400)
+            ),
             max_image_size_mb=max_image_size_mb,
-            enable_daily_limit=user_limits_cfg.get("enable_daily_limit", False),
-            daily_limit_count=max(1, user_limits_cfg.get("daily_limit_count", 10)),
+            enable_daily_limit=bool(
+                user_limits_cfg.get("enable_daily_limit", False)
+            ),
+            daily_limit_count=_bounded_int(
+                user_limits_cfg.get("daily_limit_count", 10), 10, (1, 1_000_000)
+            ),
             umo_blacklist=umo_blacklist,
             blacklist_block_message=blacklist_block_message,
         )
+        for provider_config in self._all_provider_configs:
+            provider_config.max_image_size_mb = max_image_size_mb
 
         # 快取設定
         self._plugin_config.cache_settings = CacheSettings(
-            max_cache_count=max(1, cache_cfg.get("max_cache_count", 100)),
-            cleanup_interval_hours=max(1, cache_cfg.get("cleanup_interval_hours", 24)),
+            max_cache_count=_bounded_int(
+                cache_cfg.get("max_cache_count", 100), 100, (1, 100_000)
+            ),
+            cleanup_interval_hours=_bounded_int(
+                cache_cfg.get("cleanup_interval_hours", 24), 24, (1, 720)
+            ),
         )
 
         # 生成設定
@@ -289,9 +306,13 @@ class ConfigManager:
         )
 
         self._plugin_config.generation_settings = GenerationSettings(
-            default_aspect_ratio=gen_cfg.get("default_aspect_ratio", "自動"),
-            default_resolution=gen_cfg.get("default_resolution", "1K"),
-            max_concurrent_tasks=max(1, gen_cfg.get("max_concurrent_tasks", 3)),
+            default_aspect_ratio=gen_cfg.get(
+                "default_aspect_ratio", DEFAULT_ASPECT_RATIO
+            ),
+            default_resolution=gen_cfg.get("default_resolution", DEFAULT_RESOLUTION),
+            max_concurrent_tasks=_bounded_int(
+                gen_cfg.get("max_concurrent_tasks", 3), 3, (1, 32)
+            ),
             max_queued_tasks=_bounded_int(
                 gen_cfg.get("max_queued_tasks", 6),
                 6,

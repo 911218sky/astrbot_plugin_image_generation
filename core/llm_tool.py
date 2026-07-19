@@ -49,7 +49,7 @@ def _normalize_avatar_references(value: Any) -> list[str]:
 def _resolve_aspect_ratio(
     prompt: str, requested: str | None, fallback: str | None
 ) -> str | None:
-    requested_value = (requested or "").strip()
+    requested_value = requested.strip() if isinstance(requested, str) else ""
     if requested_value and requested_value != "自動":
         return requested_value
 
@@ -147,7 +147,7 @@ def _resolve_aspect_ratio(
     ):
         return "3:4"
 
-    fallback_value = (fallback or "").strip()
+    fallback_value = fallback.strip() if isinstance(fallback, str) else ""
     if fallback_value and fallback_value != "自動":
         return fallback_value
     if requested_value:
@@ -158,7 +158,7 @@ def _resolve_aspect_ratio(
 def _resolve_resolution(
     prompt: str, requested: str | None, fallback: str | None
 ) -> str | None:
-    requested_value = (requested or "").strip()
+    requested_value = requested.strip() if isinstance(requested, str) else ""
     if requested_value:
         return requested_value
 
@@ -216,7 +216,7 @@ def _resolve_resolution(
     ):
         return "1K"
 
-    fallback_value = (fallback or "").strip()
+    fallback_value = fallback.strip() if isinstance(fallback, str) else ""
     return fallback_value or "1K"
 
 
@@ -259,9 +259,9 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
                 },
                 "resolution": {
                     "type": "string",
-                    "description": "目標圖片品質或解析度；一般圖片可用 1K，需要更高細節的桌布、海報、封面可優先選 2K，明確要求超高畫質或列印用途時可選 4K。",
-                    "enum": ["1K", "2K", "4K"],
-                    "default": "1K",
+                    "description": "目標圖片品質或解析度；使用自動時交由模型決定，一般圖片可用 1K，需要更高細節時可選 2K 或 4K。",
+                    "enum": ["自動", "1K", "2K", "4K"],
+                    "default": "自動",
                 },
                 "count": {
                     "type": "integer",
@@ -289,7 +289,8 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
     ) -> ToolExecResult:
         """執行工具呼叫。"""
         # 取得提示詞
-        prompt = kwargs.get("prompt", "").strip()
+        raw_prompt = kwargs.get("prompt", "")
+        prompt = raw_prompt.strip() if isinstance(raw_prompt, str) else ""
         if not prompt:
             return "❌ 請提供圖片生成的提示詞"
         prompt, use_self_avatar = extract_self_avatar_alias(prompt)
@@ -426,10 +427,13 @@ class ImageGenerationTool(FunctionTool[AstrAgentContext]):
 
 
 def adjust_tool_parameters(
-    tool: ImageGenerationTool, capabilities: ImageCapability
+    tool: ImageGenerationTool,
+    capabilities: ImageCapability,
+    max_batch_count: int = 10,
 ) -> None:
     """根據適配器能力動態調整工具參數。"""
     props = tool.parameters["properties"]
+    props["count"]["maximum"] = max_batch_count
 
     if not (capabilities & ImageCapability.ASPECT_RATIO):
         if "aspect_ratio" in props:

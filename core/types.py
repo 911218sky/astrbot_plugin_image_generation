@@ -47,6 +47,7 @@ class AdapterConfig:
     proxy: str | None = None
     timeout: int = 180
     max_retry_attempts: int = 5
+    max_image_size_mb: int = 30
     safety_settings: str | None = None
     capability_options: dict[str, bool] = field(default_factory=dict)
     extra: dict[str, Any] = field(default_factory=dict)  # 適配器特有配置
@@ -78,3 +79,13 @@ class GenerationResult:
 
     images: list[bytes] | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationProgress:
+    completed: int
+    total: int
+    succeeded: int
+    failed: int
+    elapsed: float
+    last_error: str | None = None

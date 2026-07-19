@@ -379,7 +379,7 @@
       },
       "max_concurrent_tasks": {
         "description": "最大併發任務數",
-        "hint": "同時生成圖片的最大數量,防止資源耗盡",
+        "hint": "同時生成圖片的最大數量，防止資源耗盡；高解析度圖片建議設定為 1 到 3",
         "type": "int",
         "slider": {
           "min": 1,
@@ -431,10 +431,11 @@
       },
       "default_resolution": {
         "description": "預設解析度",
-        "hint": "使用命令生圖時預設使用的圖片解析度（僅部分模型支援）",
+        "hint": "預設使用自動時由模型決定畫質與解析度；也可手動指定 1K、2K 或 4K",
         "type": "string",
-        "default": "1K",
+        "default": "自動",
         "options": [
+          "自動",
           "1K",
           "2K",
           "4K"
@@ -490,7 +491,7 @@
       },
       "max_image_size_mb": {
         "description": "最大圖片限制 (MB)",
-        "hint": "允許上傳的參考圖最大大小,超過此大小的圖片將被忽略",
+        "hint": "限制參考圖與生成圖片的檔案大小；超過此大小的圖片不會儲存或傳送",
         "type": "int",
         "slider": {
           "min": 1,

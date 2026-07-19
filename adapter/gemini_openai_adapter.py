@@ -11,6 +11,11 @@ from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
 from ..core.constants import GEMINI_DEFAULT_BASE_URL
+from ..core.provider_transport import (
+    decode_provider_base64,
+    download_provider_image,
+    read_provider_json,
+)
 from ..core.types import GenerationRequest, ImageCapability
 
 
@@ -31,9 +36,9 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
         """執行單次生圖請求。"""
         payload = self._build_payload(request)
         session = self._get_session()
-        response = await self._make_request(session, payload, request.task_id)
+        response, error = await self._make_request(session, payload, request.task_id)
         if response is None:
-            return None, "API 請求失敗"
+            return None, error or "API 請求失敗"
 
         images = await self._extract_images(response, request.task_id)
         if images:
@@ -87,7 +92,7 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
         session: aiohttp.ClientSession,
         payload: dict,
         task_id: str | None,
-    ) -> dict | None:
+    ) -> tuple[dict | None, str | None]:
         """傳送 API 請求。"""
         start_time = time.time()
         url = f"{self.base_url or self.DEFAULT_BASE_URL}/v1/chat/completions"
@@ -123,29 +128,23 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
                     logger.error(
                         f"{prefix} 錯誤 {response.status} (耗時: {duration:.2f}s): {preview}"
                     )
-                    return None
-                return await response.json()
+                    return None, f"API 錯誤 ({response.status})"
+                data = await read_provider_json(response)
+                return data, None if data is not None else "API 回應格式錯誤"
         except Exception as e:
             duration = time.time() - start_time
             logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {e}")
-            return None
+            return None, str(e).strip() or "API 請求失敗"
 
     async def _download_image_from_url(
         self, url: str, task_id: str | None = None
     ) -> bytes | None:
         """從 URL 下載圖像。"""
         prefix = self._get_log_prefix(task_id)
-        try:
-            session = self._get_session()
-            async with session.get(
-                url, timeout=self._get_download_timeout()
-            ) as response:
-                if response.status == 200:
-                    return await response.read()
-                logger.error(f"{prefix} 下載圖像失敗: {response.status} - {url}")
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"{prefix} 下載圖像出錯: {exc}")
-        return None
+        data = await download_provider_image(url)
+        if data is None:
+            logger.error(f"{prefix} 下載圖像失敗")
+        return data
 
     async def _extract_images(
         self, response_data: dict[str, Any], task_id: str | None = None
@@ -160,10 +159,10 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
                 if not isinstance(item, dict):
                     continue
                 if b64 := item.get("b64_json"):
-                    try:
-                        images.append(base64.b64decode(b64))
-                    except Exception as e:
-                        logger.warning(f"{prefix} Base64 解碼失敗 (b64_json): {e}")
+                    if decoded := decode_provider_base64(b64):
+                        images.append(decoded)
+                    else:
+                        logger.warning(f"{prefix} Base64 解碼失敗 (b64_json)")
                 elif url := item.get("url"):
                     if url.startswith("http"):
                         if content := await self._download_image_from_url(url, task_id):
@@ -197,10 +196,10 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
                     flags=re.IGNORECASE,
                 )
                 for _, b64_str in pattern.findall(content_without_md):
-                    try:
-                        images.append(base64.b64decode(b64_str))
-                    except Exception as e:
-                        logger.warning(f"{prefix} Base64 解碼失敗 (inline): {e}")
+                    if decoded := decode_provider_base64(b64_str):
+                        images.append(decoded)
+                    else:
+                        logger.warning(f"{prefix} Base64 解碼失敗 (inline)")
 
             elif isinstance(content, list):
                 for part in content:
@@ -244,8 +243,8 @@ class GeminiOpenAIAdapter(BaseImageAdapter):
         if url.startswith("data:image/") and ";base64," in url:
             try:
                 _, _, data_part = url.partition(";base64,")
-                return base64.b64decode(data_part)
-            except Exception as exc:  # noqa: BLE001
+                return decode_provider_base64(data_part)
+            except (AttributeError, ValueError):
                 prefix = self._get_log_prefix(task_id)
-                logger.error(f"{prefix} Base64 解碼失敗: {exc}")
+                logger.error(f"{prefix} Base64 解碼失敗")
         return None
