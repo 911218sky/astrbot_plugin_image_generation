@@ -9,6 +9,7 @@ import asyncio
 from copy import deepcopy
 import datetime
 import hashlib
+import inspect
 import json
 import time
 from collections.abc import Coroutine
@@ -43,7 +44,12 @@ from .core.reference_collector import (
 )
 from .core.safety_auditor import SafetyAuditor
 from .core.task_manager import TaskManager
-from .core.types import GenerationRequest, ImageCapability, ImageData
+from .core.types import (
+    GenerationProgress,
+    GenerationRequest,
+    ImageCapability,
+    ImageData,
+)
 from .core.usage_manager import UsageManager
 from .core.utils import (
     extract_self_avatar_alias,
@@ -395,6 +401,26 @@ class ImageGenerationPlugin(Star):
         now = time.time()
         info["status"] = "running"
         info["running_at"] = now
+        info["phase"] = "呼叫供應商生成"
+
+    def _update_generation_progress(
+        self, task_id: str, progress: GenerationProgress
+    ) -> None:
+        info = self._active_generation_tasks.get(task_id)
+        if not info:
+            return
+        info.update(
+            {
+                "completed_count": progress.completed,
+                "batch_count": progress.total,
+                "success_count": progress.succeeded,
+                "failed_count": progress.failed,
+                "provider_elapsed": progress.elapsed,
+                "phase": f"已完成 {progress.completed}/{progress.total}",
+            }
+        )
+        if progress.last_error:
+            info["last_error"] = progress.last_error
 
     def _remember_generation_task(
         self, task_id: str, status: str, **extra: Any
@@ -518,6 +544,12 @@ class ImageGenerationPlugin(Star):
             "resolution": resolution,
             "reference_count": len(images_data or []),
             "batch_count": batch_count,
+            "completed_count": 0,
+            "success_count": 0,
+            "failed_count": 0,
+            "provider_elapsed": 0.0,
+            "phase": "等待生成槽",
+            "last_error": "",
         }
         try:
             await self.admission_controller.wait(admission_ticket)
@@ -582,16 +614,23 @@ class ImageGenerationPlugin(Star):
         if not self.generator:
             logger.warning("[ImageGen] 生成器未初始化，跳過生成請求")
             return
-        result = await self.generator.generate(
-            GenerationRequest(
-                prompt=prompt,
-                images=images,
-                aspect_ratio=aspect_ratio,
-                resolution=resolution,
-                task_id=task_id,
-                count=batch_count,
-            )
+        generation_request = GenerationRequest(
+            prompt=prompt,
+            images=images,
+            aspect_ratio=aspect_ratio,
+            resolution=resolution,
+            task_id=task_id,
+            count=batch_count,
         )
+        def progress_callback(progress: GenerationProgress) -> None:
+            self._update_generation_progress(task_id, progress)
+        generate_kwargs: dict[str, Any] = {}
+        try:
+            if "progress_callback" in inspect.signature(self.generator.generate).parameters:
+                generate_kwargs["progress_callback"] = progress_callback
+        except (TypeError, ValueError):
+            pass
+        result = await self.generator.generate(generation_request, **generate_kwargs)
         end_time = time.time()
         duration = end_time - start_time
 

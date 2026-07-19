@@ -83,6 +83,24 @@ async def test_batch_fanout_preserves_order_and_reports_partial_success() -> Non
 
 
 @pytest.mark.asyncio
+async def test_batch_generation_reports_progress_as_items_finish() -> None:
+    adapter = FakeAdapter()
+    generator = make_generator(adapter)
+    progress = []
+
+    await generator.generate(
+        GenerationRequest(prompt="cat", task_id="task", count=3),
+        progress_callback=progress.append,
+    )
+
+    assert len(progress) == 3
+    assert progress[-1].completed == 3
+    assert progress[-1].total == 3
+    assert progress[-1].succeeded == 2
+    assert progress[-1].failed == 1
+
+
+@pytest.mark.asyncio
 async def test_single_generation_keeps_original_request_shape() -> None:
     adapter = FakeAdapter()
     generator = make_generator(adapter)

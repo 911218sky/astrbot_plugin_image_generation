@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import anyio
+import time
+from collections.abc import Callable
 
 from astrbot.api import logger
 
@@ -16,6 +18,7 @@ from .types import (
     AdapterConfig,
     AdapterType,
     GenerationRequest,
+    GenerationProgress,
     GenerationResult,
     ImageData,
     ImageCapability,
@@ -57,7 +60,11 @@ class ImageGenerator:
             raise ValueError(f"不支援的適配器型別: {config.type}")
         return adapter_cls(config)
 
-    async def generate(self, request: GenerationRequest) -> GenerationResult:
+    async def generate(
+        self,
+        request: GenerationRequest,
+        progress_callback: Callable[[GenerationProgress], None] | None = None,
+    ) -> GenerationResult:
         """執行生圖邏輯。"""
         # 先將參考圖批次轉換成相容格式，再呼叫下游適配器
         converted_images: list[ImageData] = []
@@ -77,10 +84,24 @@ class ImageGenerator:
             request.count, getattr(self, "_max_batch_count", DEFAULT_MAX_BATCH_COUNT)
         )
         if count == 1:
+            started_at = time.monotonic()
             async with self._batch_limiter:
-                return await self._generate_one(patched_request)
+                result = await self._generate_one(patched_request)
+            if progress_callback:
+                progress_callback(
+                    GenerationProgress(
+                        completed=1,
+                        total=1,
+                        succeeded=1 if result.images else 0,
+                        failed=0 if result.images else 1,
+                        elapsed=max(0.0, time.monotonic() - started_at),
+                        last_error=result.error,
+                    )
+                )
+            return result
 
         results: list[GenerationResult | None] = [None] * count
+        started_at = time.monotonic()
 
         async def run_one(index: int) -> None:
             task_id = request.task_id
@@ -95,7 +116,22 @@ class ImageGenerator:
                 count=1,
             )
             async with self._batch_limiter:
-                results[index] = await self._generate_one(one_request)
+                result = await self._generate_one(one_request)
+                results[index] = result
+            if progress_callback:
+                completed = sum(item is not None for item in results)
+                succeeded = sum(bool(item and item.images) for item in results)
+                failed = completed - succeeded
+                progress_callback(
+                    GenerationProgress(
+                        completed=completed,
+                        total=count,
+                        succeeded=succeeded,
+                        failed=failed,
+                        elapsed=max(0.0, time.monotonic() - started_at),
+                        last_error=result.error,
+                    )
+                )
 
         async with anyio.create_task_group() as task_group:
             for index in range(count):

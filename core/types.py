@@ -78,3 +78,13 @@ class GenerationResult:
 
     images: list[bytes] | None = None
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationProgress:
+    completed: int
+    total: int
+    succeeded: int
+    failed: int
+    elapsed: float
+    last_error: str | None = None

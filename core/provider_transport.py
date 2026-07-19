@@ -13,7 +13,7 @@ from .reference_transport import (
 
 MIB = 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 30 * MIB
-MAX_PROVIDER_JSON_BYTES = 2 * MIB
+MAX_PROVIDER_JSON_BYTES = 48 * MIB
 
 
 async def download_provider_image(url: str) -> bytes | None:
@@ -44,7 +44,7 @@ async def read_provider_json(response: Any) -> dict[str, Any] | None:
     if len(payload) > MAX_PROVIDER_JSON_BYTES:
         return None
     try:
-        parsed = json.loads(payload)
+        parsed = json.loads(payload.decode("utf-8-sig"))
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return parsed if isinstance(parsed, dict) else None

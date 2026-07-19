@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const AUTO_REFRESH_MS = 30000;
+  const AUTO_REFRESH_MS = 2000;
 
   const state = {
     data: null,
@@ -69,6 +69,18 @@
     const remain = seconds % 60;
     if (minutes <= 0) return `${remain}s`;
     return `${minutes}m ${String(remain).padStart(2, "0")}s`;
+  }
+
+  function progressLabel(task) {
+    const total = Math.max(1, Number(task.batch_count) || 1);
+    const completed = Math.min(total, Math.max(0, Number(task.completed_count) || 0));
+    return `${completed}/${total} · 成功 ${Number(task.success_count) || 0} · 失敗 ${Number(task.failed_count) || 0}`;
+  }
+
+  function progressPercent(task) {
+    const total = Math.max(1, Number(task.batch_count) || 1);
+    const completed = Math.min(total, Math.max(0, Number(task.completed_count) || 0));
+    return Math.round((completed / total) * 100);
   }
 
   function includesText(task, query) {
@@ -253,6 +265,10 @@
               </div>
               <div class="task-meta">${escapeHtml(task.user_label)} · ${escapeHtml(task.aspect_ratio)} · ${escapeHtml(task.resolution)} · 參考圖 ${task.reference_count || 0}</div>
               <div class="task-prompt">${escapeHtml(task.prompt_preview || "沒有提示詞摘要")}</div>
+              <div class="task-progress" aria-label="批次進度">
+                <div class="progress-track"><span style="width: ${progressPercent(task)}%"></span></div>
+                <div class="task-progress-meta"><span>${escapeHtml(task.phase || "等待更新")}</span><span>${progressLabel(task)} · 供應商 ${formatSeconds(task.provider_elapsed)}</span></div>
+              </div>
             </div>
             <div class="task-time">${formatSeconds(task.elapsed)}</div>
           </article>
@@ -297,7 +313,7 @@
       return statusOk && includesText(task, state.taskQuery);
     });
     if (!filtered.length) {
-      body.innerHTML = '<tr><td class="empty-state" colspan="6">沒有符合條件的進行中任務。</td></tr>';
+      body.innerHTML = '<tr><td class="empty-state" colspan="8">沒有符合條件的進行中任務。</td></tr>';
       return;
     }
     body.innerHTML = filtered
@@ -309,6 +325,8 @@
             <td>${escapeHtml(task.user_label)}<br><span class="muted">${escapeHtml(task.started_at || "")}</span></td>
             <td class="cell-prompt">${escapeHtml(task.prompt_preview || "")}</td>
             <td>${escapeHtml(task.aspect_ratio)} / ${escapeHtml(task.resolution)}<br><span class="muted">參考圖 ${task.reference_count || 0}</span></td>
+            <td>${progressLabel(task)}<br><span class="muted">${escapeHtml(task.phase || "")}</span></td>
+            <td class="mono">${formatSeconds(task.provider_elapsed)}</td>
             <td class="mono">${formatSeconds(task.elapsed)}</td>
           </tr>
         `
@@ -341,8 +359,8 @@
               ${taskBadge(task)}
             </div>
             <p>${escapeHtml(task.prompt_preview || "沒有提示詞摘要")}</p>
-            <div class="task-meta">${escapeHtml(task.user_label)} · ${escapeHtml(task.finished_at || "")} · ${formatSeconds(task.duration)}</div>
-            <div class="task-meta">圖片 ${task.image_count || 0} · ${escapeHtml(fileText)}</div>
+            <div class="task-meta">${escapeHtml(task.user_label)} · ${escapeHtml(task.finished_at || "")} · 總耗時 ${formatSeconds(task.duration)} · 供應商 ${formatSeconds(task.provider_elapsed)}</div>
+            <div class="task-meta">圖片 ${task.image_count || 0} · 批次 ${progressLabel(task)} · ${escapeHtml(fileText)}</div>
           </article>
         `;
       })

@@ -10,6 +10,7 @@ from astrbot.api import logger
 
 from ..core.base_adapter import BaseImageAdapter
 from ..core.provider_transport import (
+    MAX_PROVIDER_JSON_BYTES,
     decode_provider_base64,
     download_provider_image,
     read_provider_json,
@@ -110,9 +111,13 @@ class OpenAIAdapter(BaseImageAdapter):
         if data is not None:
             return data, None
         logger.error(
-            f"{prefix} API 回應格式錯誤或超過大小上限 (耗時: {duration:.2f}s)"
+            f"{prefix} API 回應不是有效 JSON 或超過 "
+            f"{MAX_PROVIDER_JSON_BYTES // (1024 * 1024)} MiB (耗時: {duration:.2f}s)"
         )
-        return None, "API 回應格式錯誤，無法解析生成結果"
+        return None, (
+            "API 回應格式錯誤，無法解析生成結果"
+            f"（回應上限 {MAX_PROVIDER_JSON_BYTES // (1024 * 1024)} MiB）"
+        )
 
     def _build_payload(self, request: GenerationRequest) -> dict:
         """構建請求載荷。"""

@@ -147,6 +147,8 @@ class BaseImageAdapter(abc.ABC):
 
     @staticmethod
     def _is_retryable_error(error: str) -> bool:
+        if error.startswith(("API 回應格式錯誤", "API 回應不是有效 JSON")):
+            return False
         match = re.search(r"API 錯誤 \((\d{3})\)", error)
         if match:
             status = int(match.group(1))
