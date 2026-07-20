@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
@@ -72,10 +73,11 @@ class OpenAIAdapter(BaseImageAdapter):
                 duration = time.time() - start_time
                 if resp.status != 200:
                     error_text = await resp.text()
-                    logger.error(
-                        f"{prefix} API 錯誤 ({resp.status}, 耗時: {duration:.2f}s): {error_text}"
+                    provider_error = self._format_provider_error(
+                        resp.status, error_text
                     )
-                    return None, f"API 錯誤 ({resp.status})"
+                    logger.error(f"{prefix} {provider_error}")
+                    return None, provider_error
                 data, error = await self._read_json_response(
                     resp, prefix=prefix, duration=duration
                 )
@@ -97,6 +99,28 @@ class OpenAIAdapter(BaseImageAdapter):
             error_message = str(e).strip() or e.__class__.__name__
             logger.error(f"{prefix} 請求異常 (耗時: {duration:.2f}s): {error_message}")
             return None, error_message
+
+    @staticmethod
+    def _format_provider_error(status: int, body: str) -> str:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            return f"API 錯誤 ({status})"
+
+        if not isinstance(payload, dict):
+            return f"API 錯誤 ({status})"
+        error = payload.get("error")
+        if not isinstance(error, dict):
+            return f"API 錯誤 ({status})"
+
+        details = [
+            value
+            for value in (error.get("code"), error.get("message"))
+            if isinstance(value, str) and value
+        ]
+        if not details:
+            return f"API 錯誤 ({status})"
+        return f"API 錯誤 ({status}): {' - '.join(details)}"
 
     async def _read_json_response(
         self,

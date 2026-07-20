@@ -8,6 +8,7 @@ import pytest
 
 from astrbot_plugin_image_generation.core.provider_transport import (
     MAX_PROVIDER_IMAGE_BYTES,
+    MAX_PROVIDER_JSON_BYTES,
     decode_provider_base64,
     provider_image_limit,
     read_provider_json,
@@ -25,6 +26,17 @@ class _ResponseContent:
 class _Response:
     def __init__(self, payload: bytes) -> None:
         self.content = _ResponseContent(payload)
+
+
+class _SizedResponse:
+    def __init__(self, content_length: int) -> None:
+        self.content_length = content_length
+
+        class UnexpectedContent:
+            async def read(self, _limit: int) -> bytes:
+                raise AssertionError("oversized response should be rejected before read")
+
+        self.content = UnexpectedContent()
 
 
 def test_provider_base64_rejects_oversized_payload_before_decoding() -> None:
@@ -46,6 +58,13 @@ async def test_provider_json_accepts_large_base64_image_response() -> None:
     )
 
     assert parsed == response
+
+
+@pytest.mark.asyncio
+async def test_provider_json_rejects_content_length_above_limit_before_read() -> None:
+    parsed = await read_provider_json(_SizedResponse(MAX_PROVIDER_JSON_BYTES + 1))
+
+    assert parsed is None
 
 
 @pytest.mark.asyncio
