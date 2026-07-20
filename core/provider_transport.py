@@ -18,7 +18,7 @@ from .reference_transport import (
 
 MIB = 1024 * 1024
 MAX_PROVIDER_IMAGE_BYTES = 30 * MIB
-MAX_PROVIDER_JSON_BYTES = 128 * MIB
+MAX_PROVIDER_JSON_BYTES = 256 * MIB
 PROVIDER_READ_CHUNK_SIZE = 64 * 1024
 _PROVIDER_IMAGE_LIMIT = ContextVar(
     "provider_image_limit_bytes", default=MAX_PROVIDER_IMAGE_BYTES
@@ -66,6 +66,9 @@ def decode_provider_base64(value: Any) -> bytes | None:
 
 async def read_provider_json(response: Any) -> dict[str, Any] | None:
     async with _PROVIDER_JSON_LIMITER:
+        content_length = getattr(response, "content_length", None)
+        if isinstance(content_length, int) and content_length > MAX_PROVIDER_JSON_BYTES:
+            return None
         content = response.content
         iter_chunked = getattr(content, "iter_chunked", None)
         if callable(iter_chunked):

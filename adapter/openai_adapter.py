@@ -37,11 +37,11 @@ class OpenAIAdapter(BaseImageAdapter):
 
         use_edit = bool(request.images)
         session = self._get_session()
-        base = self.base_url.rstrip("/") if self.base_url else "https://api.openai.com"
+        base = self._get_api_base_url()
         headers = {"Authorization": f"Bearer {self._get_current_api_key()}"}
 
         if use_edit:
-            url = f"{base}/v1/images/edits"
+            url = f"{base}/images/edits"
             form = aiohttp.FormData()
             form.add_field("model", self.model or "gpt-image-1")
             form.add_field("prompt", request.prompt)
@@ -57,7 +57,7 @@ class OpenAIAdapter(BaseImageAdapter):
                 )
             kwargs: dict = {"data": form}
         else:
-            url = f"{base}/v1/images/generations"
+            url = f"{base}/images/generations"
             headers["Content-Type"] = "application/json"
             kwargs = {"json": self._build_payload(request)}
 
@@ -117,6 +117,10 @@ class OpenAIAdapter(BaseImageAdapter):
             "API 回應格式錯誤，無法解析生成結果"
             f"（回應上限 {MAX_PROVIDER_JSON_BYTES // (1024 * 1024)} MiB）"
         )
+
+    def _get_api_base_url(self) -> str:
+        base = self.base_url or "https://api.openai.com"
+        return base if base.endswith("/v1") else f"{base}/v1"
 
     def _build_payload(self, request: GenerationRequest) -> dict:
         """構建請求載荷。"""
