@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from astrbot_plugin_image_generation.core.task_manager import TaskManager
 
 
@@ -31,6 +30,36 @@ async def test_background_task_exception_is_consumed_and_logged(
     assert task.done()
     assert task not in manager.background_tasks
     assert any("failing" in message and "boom" in message for message in errors)
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_has_a_bound_when_task_ignores_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = TaskManager()
+    monkeypatch.setattr(
+        "astrbot_plugin_image_generation.core.task_manager.BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS",
+        0.01,
+    )
+    cancellation_seen = asyncio.Event()
+
+    async def slow_cleanup() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await asyncio.sleep(0.1)
+
+    task = manager.create_task(slow_cleanup(), name="slow-cleanup")
+    await asyncio.sleep(0)
+
+    started = asyncio.get_running_loop().time()
+    await manager.cancel_all()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.08
+    await task
 
 
 @pytest.mark.asyncio

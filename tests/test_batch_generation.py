@@ -187,6 +187,21 @@ async def test_adapter_switch_waits_for_active_generation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_close_does_not_wait_for_active_generation() -> None:
+    adapter = BlockingAdapter()
+    generator = make_generator(adapter)
+    generator._ensure_lifecycle()
+
+    async with generator._lifecycle_condition:
+        generator._active_generations = 1
+
+    await generator.close()
+
+    assert adapter.closed is True
+    assert generator.adapter is None
+
+
+@pytest.mark.asyncio
 async def test_generation_waits_for_adapter_replacement() -> None:
     old_adapter = FakeAdapter()
     new_adapter = FakeAdapter()

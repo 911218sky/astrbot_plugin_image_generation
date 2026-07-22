@@ -8,6 +8,8 @@ from typing import Any
 
 from astrbot.api import logger
 
+BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS = 5.0
+
 
 class TaskManager:
     """統一的任務管理器，管理插件的背景任務與定時任務。"""
@@ -260,12 +262,20 @@ class TaskManager:
 
     async def cancel_all(self):
         """取消所有正在執行中的任務。"""
-        for task in list(self.background_tasks):
+        tasks = tuple(self.background_tasks)
+        for task in tasks:
             if not task.done():
                 task.cancel()
 
-        if self.background_tasks:
-            await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        if tasks:
+            _done, pending = await asyncio.wait(
+                tasks,
+                timeout=BACKGROUND_TASK_CANCEL_TIMEOUT_SECONDS,
+            )
+            if pending:
+                logger.warning(
+                    f"[ImageGen] [TaskManager] {len(pending)} 個背景任務取消逾時，繼續執行插件解除安裝"
+                )
 
         self.background_tasks.clear()
         self._loop_tasks.clear()

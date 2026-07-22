@@ -273,10 +273,13 @@ class ImageGenerator:
         self._ensure_lifecycle()
         async with self._lifecycle_condition:
             self._adapter_updating = True
-            while self._active_generations:
-                await self._lifecycle_condition.wait()
+            active_generations = self._active_generations
             adapter = self.adapter
             self.adapter = None
+        if active_generations:
+            logger.warning(
+                f"[ImageGen] 關閉適配器時仍有 {active_generations} 個生圖請求，已取消等待並繼續解除安裝"
+            )
         try:
             if adapter:
                 await adapter.close()
